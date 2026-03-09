@@ -1,0 +1,6 @@
+data/raw_videos/
+*.mp4
+*.log
+__pycache__/
+venv/
+data/transcripts/
