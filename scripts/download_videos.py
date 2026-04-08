@@ -1,27 +1,48 @@
 # scripts/download_videos.py
 import os
+import csv
 import subprocess
 
 VIDEO_DIR = "data/raw_videos"
-LINK_FILE = "video_links.txt"
+LINK_FILE = "video_links.csv"
 
-# make sure directory exists
 os.makedirs(VIDEO_DIR, exist_ok=True)
 
-# read links
-with open(LINK_FILE, "r") as f:
-    links = [line.strip() for line in f if line.strip()]
+with open(LINK_FILE, "r", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    entries = list(reader)
 
-# download each video with yt-dlp
-for url in links:
-    print(f"Downloading {url} ...")
+for entry in entries:
+    url     = entry["url"].strip()
+    channel = entry["channel"].strip()
+    start   = entry["start"].strip()
+    end     = entry["end"].strip()
+
+    if not url:
+        continue
+
+    # Build output filename using channel name instead of uploader
+    filename = f"{channel}_%(title)s"
+    if start and end:
+        filename += f"_{start.replace(':', '')}-{end.replace(':', '')}"
+    filename += ".%(ext)s"
+
+    print(f"[{channel}] Downloading {url} {f'{start} → {end}' if start else '(full video)'}")
+
     cmd = [
         "yt-dlp",
-        "-f", "bestvideo[height>=720]+bestaudio/best",  # video>=720 + audio
-        "--merge-output-format", "mp4",                 # merge video+audio to single mp4
-        "--retries", "3",                               # retry if fail
-        "--continue",                                   # resume if partially downloaded
-        "-o", os.path.join(VIDEO_DIR, "%(uploader)s_%(title)s.%(ext)s"),
+        "-f", "bestvideo[height>=720]+bestaudio/best",
+        "--merge-output-format", "mp4",
+        "--retries", "3",
+        "--continue",
+        "-o", os.path.join(VIDEO_DIR, filename),
         url
     ]
+
+    if start and end:
+        cmd += [
+            "--download-sections", f"*{start}-{end}",
+            "--force-keyframes-at-cuts"
+        ]
+
     subprocess.run(cmd)
