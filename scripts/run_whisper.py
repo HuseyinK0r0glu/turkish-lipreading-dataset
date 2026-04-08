@@ -71,3 +71,20 @@ for file in os.listdir(VIDEO_DIR):
     print(f"  Saved → {out_file}")
 
 print("Done.")
+
+# --- Summary: total audio seconds transcribed ---
+total_seconds = 0.0
+
+for file in os.listdir(OUTPUT_DIR):
+    if not file.endswith(".json"):
+        continue
+    with open(os.path.join(OUTPUT_DIR, file), "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if data["segments"]:
+        total_seconds += data["segments"][-1]["end_sec"]
+
+hours = int(total_seconds // 3600)
+minutes = int((total_seconds % 3600) // 60)
+seconds = int(total_seconds % 60)
+
+print(f"\nTotal transcribed audio: {hours}h {minutes}m {seconds}s ({total_seconds:.1f} seconds)")
