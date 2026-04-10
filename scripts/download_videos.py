@@ -76,6 +76,22 @@ def get_video_duration_seconds(url):
         return None
 
 
+def segment_tag(start, end):
+    return f"_{start.replace(':', '')}-{end.replace(':', '')}"
+
+
+def segment_already_downloaded(video_dir, channel, start, end):
+    expected_suffix = f"{segment_tag(start, end)}.mp4"
+    expected_prefix = f"{channel}_"
+
+    for name in os.listdir(video_dir):
+        if not name.startswith(expected_prefix):
+            continue
+        if name.endswith(expected_suffix):
+            return True
+    return False
+
+
 def increment_overlap_count(overlapping_video_intervals, overlap_key):
     overlapping_video_intervals[overlap_key] = overlapping_video_intervals.get(overlap_key, 0) + 1
 
@@ -171,8 +187,12 @@ def download_videos(seen_video_intervals, overlapping_video_intervals, link_file
 
         filename = f"{channel}_%(title)s"
         if start and end:
-            filename += f"_{start.replace(':', '')}-{end.replace(':', '')}"
+            filename += segment_tag(start, end)
         filename += ".%(ext)s"
+
+        if segment_already_downloaded(video_dir, channel, start, end):
+            print(f"[{channel}] Skipping (already downloaded): {url} ({start} -> {end})")
+            continue
 
         print(f"[{channel}] Downloading {url} {f'{start} → {end}' if start else '(full video)'}")
 

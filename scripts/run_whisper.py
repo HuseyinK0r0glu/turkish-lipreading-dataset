@@ -25,6 +25,7 @@ def transcribe_videos(video_dir=VIDEO_DIR, output_dir=OUTPUT_DIR, model_name="la
         out_file = os.path.join(output_dir, f"{os.path.splitext(file)[0]}.json")
 
         if os.path.exists(out_file):
+            print(f"Skipping transcription (already exists): {out_file}")
             continue
 
         result = model.transcribe(
