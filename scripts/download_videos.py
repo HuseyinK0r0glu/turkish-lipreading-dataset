@@ -1,48 +1,203 @@
 # scripts/download_videos.py
-import os
 import csv
+import os
 import subprocess
+import math
+from urllib.parse import parse_qs, urlparse
 
 VIDEO_DIR = "data/raw_videos"
 LINK_FILE = "video_links.csv"
 
-os.makedirs(VIDEO_DIR, exist_ok=True)
 
-with open(LINK_FILE, "r", encoding="utf-8") as f:
-    reader = csv.DictReader(f)
-    entries = list(reader)
+def normalize_video_url(url):
+    parsed = urlparse(url.strip())
+    host = parsed.netloc.lower().replace("www.", "").replace("m.", "")
+    path = parsed.path.rstrip("/")
 
-for entry in entries:
-    url     = entry["url"].strip()
-    channel = entry["channel"].strip()
-    start   = entry["start"].strip()
-    end     = entry["end"].strip()
+    if host in {"youtube.com", "youtu.be"}:
+        if host == "youtu.be":
+            video_id = path.lstrip("/")
+            if video_id:
+                return f"https://youtube.com/watch?v={video_id}"
+        if path == "/watch":
+            video_id = parse_qs(parsed.query).get("v", [""])[0]
+            if video_id:
+                return f"https://youtube.com/watch?v={video_id}"
+        if path.startswith("/shorts/"):
+            short_id = path.split("/shorts/", 1)[1].split("/", 1)[0]
+            if short_id:
+                return f"https://youtube.com/shorts/{short_id}"
 
-    if not url:
-        continue
+    return f"{parsed.scheme}://{host}{parsed.path}"
 
-    # Build output filename using channel name instead of uploader
-    filename = f"{channel}_%(title)s"
-    if start and end:
-        filename += f"_{start.replace(':', '')}-{end.replace(':', '')}"
-    filename += ".%(ext)s"
 
-    print(f"[{channel}] Downloading {url} {f'{start} → {end}' if start else '(full video)'}")
+def parse_time_to_seconds(time_text):
+    value = time_text.strip()
+    if not value:
+        return None
 
-    cmd = [
-        "yt-dlp",
-        "-f", "bestvideo[height>=720]+bestaudio/best",
-        "--merge-output-format", "mp4",
-        "--retries", "3",
-        "--continue",
-        "-o", os.path.join(VIDEO_DIR, filename),
-        url
-    ]
+    parts = value.split(":")
+    try:
+        if len(parts) == 3:
+            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return float(parts[0]) * 60 + float(parts[1])
+        if len(parts) == 1:
+            return float(parts[0])
+    except ValueError:
+        return None
+    return None
 
-    if start and end:
-        cmd += [
-            "--download-sections", f"*{start}-{end}",
-            "--force-keyframes-at-cuts"
+
+def format_seconds(total_seconds):
+    hours = int(total_seconds // 3600)
+    minutes = int((total_seconds % 3600) // 60)
+    seconds = total_seconds - (hours * 3600 + minutes * 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+
+
+def format_hhmmss(total_seconds):
+    whole = int(math.ceil(total_seconds))
+    hours = whole // 3600
+    minutes = (whole % 3600) // 60
+    seconds = whole % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def get_video_duration_seconds(url):
+    try:
+        output = subprocess.check_output(
+            ["yt-dlp", "--print", "%(duration)s", url],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        return float(output)
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        return None
+
+
+def increment_overlap_count(overlapping_video_intervals, overlap_key):
+    overlapping_video_intervals[overlap_key] = overlapping_video_intervals.get(overlap_key, 0) + 1
+
+
+def download_videos(seen_video_intervals, overlapping_video_intervals, link_file=LINK_FILE, video_dir=VIDEO_DIR):
+    os.makedirs(video_dir, exist_ok=True)
+    seen_video_intervals.clear()
+    overlapping_video_intervals.clear()
+
+    with open(link_file, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        entries = list(reader)
+
+    intervals_by_url = {}
+    duration_cache = {}
+
+    for row_index, entry in enumerate(entries, start=2):
+        url = entry["url"].strip()
+        channel = entry["channel"].strip()
+        start = entry["start"].strip()
+        end = entry["end"].strip()
+
+        if not url:
+            continue
+
+        normalized_url = normalize_video_url(url)
+
+        should_skip_download = False
+        overlap_start_fmt = None
+        overlap_end_fmt = None
+
+        is_full_video = False
+        if not start and not end:
+            if normalized_url not in duration_cache:
+                duration_cache[normalized_url] = get_video_duration_seconds(url)
+            duration_seconds = duration_cache[normalized_url]
+            if duration_seconds is None or duration_seconds <= 0:
+                print(f"[{channel}] Skipping row {row_index}: could not read duration for full-video URL")
+                continue
+            start = "00:00:00"
+            end = format_hhmmss(duration_seconds)
+            is_full_video = True
+        elif bool(start) != bool(end):
+            print(f"[{channel}] Skipping row {row_index}: both start and end must be provided together")
+            continue
+
+        start_sec = parse_time_to_seconds(start)
+        end_sec = parse_time_to_seconds(end)
+
+        if start_sec is None or end_sec is None:
+            print(f"[{channel}] Skipping row {row_index}: invalid time format ({start} -> {end})")
+            continue
+        if end_sec <= start_sec:
+            print(f"[{channel}] Skipping row {row_index}: invalid interval ({start} -> {end})")
+            continue
+
+        prior_intervals = intervals_by_url.setdefault(normalized_url, [])
+        for prev_start, prev_end, prev_start_raw, prev_end_raw, prev_is_full_video in prior_intervals:
+            if prev_is_full_video:
+                overlap_start_fmt = format_seconds(start_sec)
+                overlap_end_fmt = format_seconds(end_sec)
+
+                increment_overlap_count(
+                    overlapping_video_intervals,
+                    (normalized_url, start, end, overlap_start_fmt, overlap_end_fmt),
+                )
+                should_skip_download = True
+                break
+
+            overlap_start = max(start_sec, prev_start)
+            overlap_end = min(end_sec, prev_end)
+            if (overlap_end - overlap_start) >= 1.0:
+                overlap_start_fmt = format_seconds(overlap_start)
+                overlap_end_fmt = format_seconds(overlap_end)
+
+                increment_overlap_count(
+                    overlapping_video_intervals,
+                    (normalized_url, start, end, overlap_start_fmt, overlap_end_fmt),
+                )
+                should_skip_download = True
+                break
+
+        if should_skip_download:
+            print(
+                f"[{channel}] Skipping due to overlap: {url} "
+                f"({start} -> {end}) overlaps {overlap_start_fmt} -> {overlap_end_fmt}"
+            )
+            continue
+
+        # Only keep intervals that are not skipped due to overlap.
+        seen_video_intervals.add((normalized_url, start, end, is_full_video))
+        prior_intervals.append((start_sec, end_sec, start, end, is_full_video))
+
+        filename = f"{channel}_%(title)s"
+        if start and end:
+            filename += f"_{start.replace(':', '')}-{end.replace(':', '')}"
+        filename += ".%(ext)s"
+
+        print(f"[{channel}] Downloading {url} {f'{start} → {end}' if start else '(full video)'}")
+
+        cmd = [
+            "yt-dlp",
+            "-f",
+            "bestvideo[height>=720]+bestaudio/best",
+            "--merge-output-format",
+            "mp4",
+            "--retries",
+            "3",
+            "--continue",
+            "-o",
+            os.path.join(video_dir, filename),
+            url,
         ]
 
-    subprocess.run(cmd)
+        cmd += [
+            "--download-sections",
+            f"*{start}-{end}",
+            "--force-keyframes-at-cuts",
+        ]
+
+        subprocess.run(cmd)
+
+
+if __name__ == "__main__":
+    download_videos(set(), {})
