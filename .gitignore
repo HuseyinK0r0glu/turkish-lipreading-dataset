@@ -4,3 +4,4 @@ data/raw_videos/
 __pycache__/
 venv/
 data/transcripts/
+venv311/
