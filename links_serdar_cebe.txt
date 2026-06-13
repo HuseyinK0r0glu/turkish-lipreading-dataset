@@ -1,0 +1,32 @@
+# Serdar Cebe — solo-anchor source videos for pipeline_cuneyt_solo.py
+# Program: Serdar Cebe İle Sözcü Ana Haber (Sözcü TV, full bulletins)
+# Format: single anchor on screen (lips match audio); cuts to footage are auto-discarded.
+# NEEDS OWN REFERENCE FACE of Serdar Cebe (your c.webp is Cuneyt -> will NOT match).
+# Run: python scripts/pipeline_cuneyt_solo.py --links-file links_serdar_cebe.txt --reference-image serdar.jpg
+#
+https://youtu.be/5zSx88mhRlM
+https://youtu.be/6eafY64zewk
+https://youtu.be/6u1PbWsIQn0
+https://youtu.be/6wyA96eRc2k
+https://youtu.be/7nwQ1I2Ynxw
+https://youtu.be/8GPZ0rAfZlM
+https://youtu.be/9qXHC09fL9k
+https://youtu.be/cahxTDSEx_c
+https://youtu.be/cqv1jNift9o
+https://youtu.be/cWggicvio4o
+https://youtu.be/cyxIsuAg8fs
+https://youtu.be/Cz77rPOpBBE
+https://youtu.be/cZGWoTLUHcA
+https://youtu.be/DvZaukwy7E8
+https://youtu.be/DYIFEeGVHUs
+https://youtu.be/D-z5ltTxaQk
+https://youtu.be/hFVcecmU3Ik
+https://youtu.be/KxQiGt3KSEE
+https://youtu.be/luLdCP8xf0M
+https://youtu.be/OZHyk7LzPnA
+https://youtu.be/pfwhhb59-Rw
+https://youtu.be/q6VNuXbwzEY
+https://youtu.be/r_MecDATPSY
+https://youtu.be/TqQVBg6UYGg
+https://youtu.be/U6uN2DBSIUw
+https://youtu.be/vjUwTp4CQ4o

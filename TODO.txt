@@ -1,0 +1,3 @@
+Delete txt files for single reporters.
+Find videoes for cem öğretir and for can okanar as well and add those to the test pipeline after getting thir photos
+Hacer Hoca - Cloud

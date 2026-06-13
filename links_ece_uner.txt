@@ -1,0 +1,22 @@
+# Ece Üner — solo-anchor source videos for pipeline_cuneyt_solo.py
+# Program: Ece Üner ile Halk Ana Haber (full bulletins)
+# Format: single anchor on screen (lips match audio); cuts to footage are auto-discarded.
+# NEEDS OWN REFERENCE FACE of Ece Üner (your c.webp is Cuneyt -> will NOT match).
+# Run: python scripts/pipeline_cuneyt_solo.py --links-file links_ece_uner.txt --reference-image ece.jpg
+#
+https://youtu.be/T3GsLAqPCtY
+https://youtu.be/UhVql-ts-Dw
+https://youtu.be/B4x69sn-pk8
+https://youtu.be/zAuqglevpno
+https://youtu.be/kuPR_-qqjB0
+https://youtu.be/X_clJyEXySw
+https://youtu.be/dR1AnCNM-Q4
+https://youtu.be/ET2ryxc0f7w
+https://youtu.be/_v2QY3GWkQ4
+https://youtu.be/7ciM0qDWnzo
+https://youtu.be/aE2re9BDtTI
+https://youtu.be/TOEaoGrj3hc
+https://youtu.be/upgx4t3PQ6w
+https://youtu.be/WBXIfnaVSFI
+https://youtu.be/s24xyfWllnI
+https://youtu.be/OZQOb2FBCjU

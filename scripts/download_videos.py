@@ -2,8 +2,12 @@
 import csv
 import os
 import subprocess
+import sys
 import math
 from urllib.parse import parse_qs, urlparse
+
+def _yt_dlp():
+    return [sys.executable, "-m", "yt_dlp"]
 
 VIDEO_DIR = "data/raw_videos"
 LINK_FILE = "video_links.csv"
@@ -67,7 +71,7 @@ def format_hhmmss(total_seconds):
 def get_video_duration_seconds(url):
     try:
         output = subprocess.check_output(
-            ["yt-dlp", "--print", "%(duration)s", url],
+            [*_yt_dlp(), "--print", "%(duration)s", url],
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
@@ -197,7 +201,7 @@ def download_videos(seen_video_intervals, overlapping_video_intervals, link_file
         print(f"[{channel}] Downloading {url} {f'{start} → {end}' if start else '(full video)'}")
 
         cmd = [
-            "yt-dlp",
+            *_yt_dlp(),
             "-f",
             "bestvideo[height>=720]+bestaudio/best",
             "--merge-output-format",
