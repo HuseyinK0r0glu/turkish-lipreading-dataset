@@ -5,7 +5,6 @@ __pycache__/
 venv/
 data/transcripts/
 venv311/
-pipeline2_reporter_pictures/
 data/pipeline2_raw/
 data/reporter_transcripts/
 data/quick_test/
