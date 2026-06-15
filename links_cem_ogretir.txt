@@ -1,0 +1,34 @@
+# Cem Öğretir — solo-anchor source videos for pipeline 2 (solo-presenter).
+# Program: atv Ana Haber (atv Haber, full bulletins).
+# Format: single anchor reads to camera; cuts to footage / two-shots are auto-discarded.
+# Reference face: pipeline2_reporter_pictures/cem_ogretir.jpeg
+# Run (all reporters): python scripts/run_all.py   (or via build_video_links.py + pipeline2.py)
+#
+https://youtu.be/0cgOtFQrJU4
+https://youtu.be/bzUTGqqTVYQ
+https://youtu.be/loU7QUF6BSw
+https://youtu.be/Z_F6Tsk3CM4
+https://youtu.be/EC_wXH0NgX0
+https://youtu.be/h099jhdblDM
+https://youtu.be/FPFBVZ5owPM
+https://youtu.be/dPVxsEXGE2w
+https://youtu.be/EUUro3AUumE
+https://youtu.be/p32BistCI40
+https://youtu.be/APBTBhC3kUw
+https://youtu.be/C-uUyaN-q54
+https://youtu.be/6jQT1W8y14I
+https://youtu.be/AcO2_6tHDIE
+https://youtu.be/f6Q42KjoZbw
+https://youtu.be/9HvplRVmmmE
+https://youtu.be/IGbnN9i5_Is
+https://youtu.be/87DM9tP2FM4
+https://youtu.be/F-iCFEYBed8
+https://youtu.be/wQPxemcb8IY
+https://youtu.be/-hcFNA6-Y0o
+https://youtu.be/y3edIirMJ7A
+https://youtu.be/RIVNxIGSylI
+https://youtu.be/16d4Zn1nt48
+https://youtu.be/kVd_6Tmylvk
+https://youtu.be/97V4Pd_JkLQ
+https://youtu.be/UlcoCwc-_-E
+https://youtu.be/DfsD3h6PoR4

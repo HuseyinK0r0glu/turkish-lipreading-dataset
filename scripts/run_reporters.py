@@ -28,6 +28,8 @@ REPORTERS = [
     ("serdar_cebe",      "links_serdar_cebe.txt",      "serdar.jpeg"),
     ("ece_uner",         "links_ece_uner.txt",         "ece.jpeg"),
     ("ismail_kucukkaya", "links_ismail_kucukkaya.txt", "ismail.jpeg"),
+    ("cem_ogretir",      "links_cem_ogretir.txt",      "cem_ogretir.jpeg"),
+    ("can_okanar",       "links_can_okanar.txt",        "can_okanar.jpeg"),
 ]
 
 # Filter knobs passed to the pipeline (override the script defaults of 3 / 0.47).

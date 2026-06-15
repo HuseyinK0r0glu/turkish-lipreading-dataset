@@ -26,6 +26,8 @@ REPORTERS = {
     "ece_uner":         ("links_ece_uner.txt",         "Halk TV"),
     "ismail_kucukkaya": ("links_ismail_kucukkaya.txt", "Halk TV"),
     "cuneyt_ozdemir":   ("links_cuneyt_ozdemir.txt",   "Cüneyt Özdemir"),
+    "cem_ogretir":      ("links_cem_ogretir.txt",      "atv Haber"),
+    "can_okanar":       ("links_can_okanar.txt",       "A Haber"),
 }
 
 
