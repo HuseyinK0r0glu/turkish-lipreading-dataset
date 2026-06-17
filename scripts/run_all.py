@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from download_videos import download_videos, parse_time_to_seconds  # noqa: E402
 import run_whisper  # noqa: E402
 import pipeline2  # noqa: E402
-from pipeline_cuneyt_solo import load_reference_encoding, extract_video_id  # noqa: E402
+from presenter_filter import load_reference_encoding, extract_video_id  # noqa: E402
 
 PROJECT = Path(__file__).resolve().parent.parent
 VIDEO_LINKS = PROJECT / "video_links.csv"

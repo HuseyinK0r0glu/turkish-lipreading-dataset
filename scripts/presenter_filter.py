@@ -381,10 +381,12 @@ def parse_args():
             "only the target person appears."
         )
     )
-    parser.add_argument("--links-file", default="linkCNN.txt")
-    parser.add_argument("--reference-image", default="c.webp")
+    parser.add_argument("--links-file", required=True,
+                        help="Path to a reporter links file, e.g. reporter_links/links_cem_ogretir.txt")
+    parser.add_argument("--reference-image", required=True,
+                        help="Path to reference face photo, e.g. pipeline2_reporter_pictures/cem_ogretir.jpeg")
     parser.add_argument("--downloads-dir", default="data/raw_videos")
-    parser.add_argument("--output-dir", default="data/cuneyt_solo_clips")
+    parser.add_argument("--output-dir", default="data/reporter_solo_clips")
     parser.add_argument("--scene-threshold", type=float, default=30.0)
     parser.add_argument("--sample-count", type=int, default=3)
     parser.add_argument("--face-tolerance", type=float, default=0.47)

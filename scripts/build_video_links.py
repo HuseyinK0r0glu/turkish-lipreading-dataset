@@ -2,7 +2,7 @@
 
 Columns: url, channel, start, end, pipeline, reporter
   pipeline 1 rows -> kept from the existing video_links.csv (download + Whisper)
-  pipeline 2 rows -> regenerated from the per-reporter links_*.txt files
+  pipeline 2 rows -> regenerated from the per-reporter links_*.txt files in reporter_links/
 
 Idempotent: existing pipeline-1 rows are preserved; pipeline-2 rows are always
 rebuilt from the txt files, so you can edit the txts and re-run this safely.
@@ -19,15 +19,15 @@ FIELDS = ["url", "channel", "start", "end", "pipeline", "reporter", "completed"]
 
 # reporter slug -> (links file, broadcaster channel name)
 REPORTERS = {
-    "fatih_portakal":   ("links_fatih_portakal.txt",   "Fatih Portakal TV"),
-    "kubra_par":        ("links_kubra_par.txt",        "TV100"),
-    "gulsah_ekinci":    ("links_gulsah_ekinci.txt",    "Halk TV"),
-    "serdar_cebe":      ("links_serdar_cebe.txt",      "Sözcü TV"),
-    "ece_uner":         ("links_ece_uner.txt",         "Halk TV"),
-    "ismail_kucukkaya": ("links_ismail_kucukkaya.txt", "Halk TV"),
-    "cuneyt_ozdemir":   ("links_cuneyt_ozdemir.txt",   "Cüneyt Özdemir"),
-    "cem_ogretir":      ("links_cem_ogretir.txt",      "atv Haber"),
-    "can_okanar":       ("links_can_okanar.txt",       "A Haber"),
+    "fatih_portakal":   ("reporter_links/links_fatih_portakal.txt",   "Fatih Portakal TV"),
+    "kubra_par":        ("reporter_links/links_kubra_par.txt",        "TV100"),
+    "gulsah_ekinci":    ("reporter_links/links_gulsah_ekinci.txt",    "Halk TV"),
+    "serdar_cebe":      ("reporter_links/links_serdar_cebe.txt",      "Sözcü TV"),
+    "ece_uner":         ("reporter_links/links_ece_uner.txt",         "Halk TV"),
+    "ismail_kucukkaya": ("reporter_links/links_ismail_kucukkaya.txt", "Halk TV"),
+    "cuneyt_ozdemir":   ("reporter_links/links_cuneyt_ozdemir.txt",   "Cüneyt Özdemir"),
+    "cem_ogretir":      ("reporter_links/links_cem_ogretir.txt",      "atv Haber"),
+    "can_okanar":       ("reporter_links/links_can_okanar.txt",       "A Haber"),
 }
 
 

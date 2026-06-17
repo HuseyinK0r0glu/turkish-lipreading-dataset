@@ -7,7 +7,7 @@ Setup (you do this once):
   2. Run:  venv/bin/python scripts/run_reporters.py
      (or run a single reporter:  ... scripts/run_reporters.py fatih_portakal)
 
-For each reporter it calls scripts/pipeline_cuneyt_solo.py on that reporter's
+For each reporter it calls scripts/presenter_filter.py on that reporter's
 links file with that reporter's reference image, writing kept solo clips to
 data/<slug>_solo_clips/ plus a scene_boundaries.csv.
 """
@@ -17,19 +17,19 @@ import sys
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
-PIPELINE = PROJECT / "scripts" / "pipeline_cuneyt_solo.py"
+PIPELINE = PROJECT / "scripts" / "presenter_filter.py"
 REF_DIR = PROJECT / "data" / "reference_faces"
 
 # slug, links file, reference image filename (placed by you in data/reference_faces/)
 REPORTERS = [
-    ("fatih_portakal",   "links_fatih_portakal.txt",   "fatih.jpeg"),
-    ("kubra_par",        "links_kubra_par.txt",        "kubra.jpeg"),
-    ("gulsah_ekinci",    "links_gulsah_ekinci.txt",    "gulsah.jpeg"),
-    ("serdar_cebe",      "links_serdar_cebe.txt",      "serdar.jpeg"),
-    ("ece_uner",         "links_ece_uner.txt",         "ece.jpeg"),
-    ("ismail_kucukkaya", "links_ismail_kucukkaya.txt", "ismail.jpeg"),
-    ("cem_ogretir",      "links_cem_ogretir.txt",      "cem_ogretir.jpeg"),
-    ("can_okanar",       "links_can_okanar.txt",        "can_okanar.jpeg"),
+    ("fatih_portakal",   "reporter_links/links_fatih_portakal.txt",   "fatih.jpeg"),
+    ("kubra_par",        "reporter_links/links_kubra_par.txt",        "kubra.jpeg"),
+    ("gulsah_ekinci",    "reporter_links/links_gulsah_ekinci.txt",    "gulsah.jpeg"),
+    ("serdar_cebe",      "reporter_links/links_serdar_cebe.txt",      "serdar.jpeg"),
+    ("ece_uner",         "reporter_links/links_ece_uner.txt",         "ece.jpeg"),
+    ("ismail_kucukkaya", "reporter_links/links_ismail_kucukkaya.txt", "ismail.jpeg"),
+    ("cem_ogretir",      "reporter_links/links_cem_ogretir.txt",      "cem_ogretir.jpeg"),
+    ("can_okanar",       "reporter_links/links_can_okanar.txt",       "can_okanar.jpeg"),
 ]
 
 # Filter knobs passed to the pipeline (override the script defaults of 3 / 0.47).

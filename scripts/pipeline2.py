@@ -5,7 +5,7 @@ Per pipeline-2 video:
   (matched against pipeline2_reporter_pictures/<reporter>.jpeg) -> export clips
   -> transcribe each clip with Whisper (same JSON schema as pipeline 1).
 
-Reuses the building blocks from pipeline_cuneyt_solo.py and run_whisper.py so the
+Reuses the building blocks from presenter_filter.py and run_whisper.py so the
 behaviour stays consistent with the existing scripts.
 """
 
@@ -16,7 +16,7 @@ from pathlib import Path
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pipeline_cuneyt_solo import (  # noqa: E402
+from presenter_filter import (  # noqa: E402
     detect_scenes,
     download_video,
     export_clip,

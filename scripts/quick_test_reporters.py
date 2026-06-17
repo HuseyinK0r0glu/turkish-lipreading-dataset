@@ -22,7 +22,7 @@ import cv2
 import face_recognition
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pipeline_cuneyt_solo import (  # noqa: E402
+from presenter_filter import (  # noqa: E402
     detect_scenes,
     export_clip,
     ffmpeg_executable,
@@ -36,12 +36,14 @@ TEST_DIR = PROJECT / "data" / "quick_test"
 
 # (display name, links file, reference image filename)
 REPORTERS = [
-    ("Fatih Portakal", "links_fatih_portakal.txt", "fatih.jpeg"),
-    ("Kubra Par", "links_kubra_par.txt", "kubra.jpeg"),
-    ("Gulsah Ekinci", "links_gulsah_ekinci.txt", "gulsah.jpeg"),
-    ("Serdar Cebe", "links_serdar_cebe.txt", "serdar.jpeg"),
-    ("Ece Uner", "links_ece_uner.txt", "ece.jpeg"),
-    ("Ismail Kucukkaya", "links_ismail_kucukkaya.txt", "ismail.jpeg"),
+    ("Fatih Portakal",    "reporter_links/links_fatih_portakal.txt",   "fatih.jpeg"),
+    ("Kubra Par",         "reporter_links/links_kubra_par.txt",        "kubra.jpeg"),
+    ("Gulsah Ekinci",     "reporter_links/links_gulsah_ekinci.txt",    "gulsah.jpeg"),
+    ("Serdar Cebe",       "reporter_links/links_serdar_cebe.txt",      "serdar.jpeg"),
+    ("Ece Uner",          "reporter_links/links_ece_uner.txt",         "ece.jpeg"),
+    ("Ismail Kucukkaya",  "reporter_links/links_ismail_kucukkaya.txt", "ismail.jpeg"),
+    ("Cem Ogretir",       "reporter_links/links_cem_ogretir.txt",      "cem_ogretir.jpeg"),
+    ("Can Okanar",        "reporter_links/links_can_okanar.txt",       "can_okanar.jpeg"),
 ]
 
 PROBE_N = 6          # how many videos to probe for the shortest
