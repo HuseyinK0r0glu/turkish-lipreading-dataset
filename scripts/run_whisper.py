@@ -10,7 +10,13 @@ OUTPUT_DIR = "data/transcripts"
 
 
 def normalize_text(text):
-    return unicodedata.normalize("NFC", text)
+    """NFC-normalize and strip surrounding whitespace.
+
+    Whisper emits word tokens with a leading space (" Yargı"), which would make
+    " Yargı" and "Yargı" two different word classes in Phase 3. Strip here so every
+    surface_form / lemma / segment text in the corpus is the bare token.
+    """
+    return unicodedata.normalize("NFC", text).strip()
 
 
 def transcribe_videos(video_dir=VIDEO_DIR, output_dir=OUTPUT_DIR, model_name="large-v3"):
@@ -28,12 +34,18 @@ def transcribe_videos(video_dir=VIDEO_DIR, output_dir=OUTPUT_DIR, model_name="la
             print(f"Skipping transcription (already exists): {out_file}")
             continue
 
-        result = model.transcribe(
-            video_path,
-            word_timestamps=True,
-            language="tr",
-            verbose=False,
-        )
+        try:
+            result = model.transcribe(
+                video_path,
+                word_timestamps=True,
+                language="tr",
+                verbose=False,
+            )
+        except Exception as exc:
+            # One unreadable/truncated download must not abort the whole run;
+            # no JSON is written, so a later run retries this file.
+            print(f"TRANSCRIPTION FAILED for {file}: {type(exc).__name__}: {exc}")
+            continue
 
         custom_result = {"video": file, "segments": []}
 

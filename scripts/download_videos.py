@@ -1,6 +1,7 @@
 # scripts/download_videos.py
 import csv
 import os
+import shutil
 import subprocess
 import sys
 import math
@@ -9,8 +10,34 @@ from urllib.parse import parse_qs, urlparse
 def _yt_dlp():
     return [sys.executable, "-m", "yt_dlp"]
 
+
+def ffmpeg_location():
+    """Path to hand yt-dlp via --ffmpeg-location, or None if ffmpeg is on PATH.
+
+    yt-dlp needs ffmpeg both for --download-sections and for merging
+    bestvideo+bestaudio; without it every row dies with "ffmpeg is not installed"
+    or "Requested format is not available". Falls back to the binary bundled with
+    imageio-ffmpeg so no system install is strictly required.
+
+    Deliberately duplicated from presenter_filter.ffmpeg_executable() so that
+    pipeline 1 does not have to import face_recognition.
+    """
+    if shutil.which("ffmpeg"):
+        return None  # already on PATH; yt-dlp finds it by itself
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+
+        return get_ffmpeg_exe()
+    except Exception:
+        return None
+
 VIDEO_DIR = "data/raw_videos"
 LINK_FILE = "video_links.csv"
+
+# Same policy as presenter_filter.DOWNLOAD_FORMAT: >=720p is a hard requirement, so a
+# lower-resolution source is skipped (row left pending) instead of polluting the
+# dataset with mouth crops upscaled from 480p.
+DOWNLOAD_FORMAT = "bestvideo[height>=720]+bestaudio/best[height>=720]"
 
 
 def normalize_video_url(url):
@@ -101,6 +128,13 @@ def increment_overlap_count(overlapping_video_intervals, overlap_key):
 
 
 def download_videos(seen_video_intervals, overlapping_video_intervals, link_file=LINK_FILE, video_dir=VIDEO_DIR):
+    """Download every row of link_file.
+
+    Returns the set of (url, start, end) keys — taken verbatim from the CSV — that
+    need no further work: downloaded now, already on disk, or intentionally skipped
+    as an overlapping duplicate. Rows that FAILED are absent, so the caller must not
+    mark them completed. (Callers that ignore the return value keep working.)
+    """
     os.makedirs(video_dir, exist_ok=True)
     seen_video_intervals.clear()
     overlapping_video_intervals.clear()
@@ -111,6 +145,8 @@ def download_videos(seen_video_intervals, overlapping_video_intervals, link_file
 
     intervals_by_url = {}
     duration_cache = {}
+    completed_keys = set()
+    ffmpeg_path = ffmpeg_location()
 
     for row_index, entry in enumerate(entries, start=2):
         url = entry["url"].strip()
@@ -120,6 +156,10 @@ def download_videos(seen_video_intervals, overlapping_video_intervals, link_file
 
         if not url:
             continue
+
+        # start/end are rewritten below for full-video rows; keep the CSV's own
+        # values so the caller can match the key back to its row.
+        row_key = (url, start, end)
 
         normalized_url = normalize_video_url(url)
 
@@ -183,6 +223,7 @@ def download_videos(seen_video_intervals, overlapping_video_intervals, link_file
                 f"[{channel}] Skipping due to overlap: {url} "
                 f"({start} -> {end}) overlaps {overlap_start_fmt} -> {overlap_end_fmt}"
             )
+            completed_keys.add(row_key)  # duplicate coverage: nothing left to do
             continue
 
         # Only keep intervals that are not skipped due to overlap.
@@ -196,6 +237,7 @@ def download_videos(seen_video_intervals, overlapping_video_intervals, link_file
 
         if segment_already_downloaded(video_dir, channel, start, end):
             print(f"[{channel}] Skipping (already downloaded): {url} ({start} -> {end})")
+            completed_keys.add(row_key)
             continue
 
         print(f"[{channel}] Downloading {url} {f'{start} → {end}' if start else '(full video)'}")
@@ -203,7 +245,7 @@ def download_videos(seen_video_intervals, overlapping_video_intervals, link_file
         cmd = [
             *_yt_dlp(),
             "-f",
-            "bestvideo[height>=720]+bestaudio/best",
+            DOWNLOAD_FORMAT,
             "--merge-output-format",
             "mp4",
             "--retries",
@@ -220,7 +262,17 @@ def download_videos(seen_video_intervals, overlapping_video_intervals, link_file
             "--force-keyframes-at-cuts",
         ]
 
-        subprocess.run(cmd)
+        if ffmpeg_path:
+            cmd += ["--ffmpeg-location", ffmpeg_path]
+
+        result = subprocess.run(cmd)
+        if result.returncode == 0:
+            completed_keys.add(row_key)
+        else:
+            print(f"[{channel}] DOWNLOAD FAILED (yt-dlp exit {result.returncode}): "
+                  f"{url} ({start} -> {end}) - row left pending for a re-run")
+
+    return completed_keys
 
 
 if __name__ == "__main__":

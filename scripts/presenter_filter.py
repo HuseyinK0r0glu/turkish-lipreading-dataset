@@ -1,5 +1,6 @@
 import argparse
 import csv
+import math
 import re
 import shutil
 import subprocess
@@ -26,6 +27,18 @@ if sys.version_info >= (3, 13):
         "face_recognition/dlib bu surumde genelde wheel sunmuyor. "
         "Python 3.11 veya 3.12 kullanin."
     )
+
+
+# >=720p is a HARD requirement: below that the mouth ROI is too small to survive the
+# 88x88 lip crop. A video that caps at 480p fails with "Requested format is not
+# available"; run_all.run_pipeline2 catches that, logs it, and leaves the row pending
+# rather than aborting the run. Append "/bestvideo+bestaudio/best" to accept lower
+# resolutions instead.
+DOWNLOAD_FORMAT = "bestvideo[height>=720]+bestaudio/best[height>=720]"
+
+# Identity-check sampling density for long scenes (see sample_times).
+SECONDS_PER_SAMPLE = 30.0
+MAX_SAMPLES = 20
 
 
 def read_links(links_file: Path) -> List[str]:
@@ -144,7 +157,7 @@ def download_video(url: str, downloads_dir: Path) -> Path:
     cmd = [
         *yt_dlp_base_cmd(),
         "-f",
-        "bestvideo[height>=720]+bestaudio/best/best",
+        DOWNLOAD_FORMAT,
         "--merge-output-format",
         "mp4",
         "--retries",
@@ -161,6 +174,12 @@ def download_video(url: str, downloads_dir: Path) -> Path:
         "filename:%(filename)s",
         url,
     ]
+
+    # Merging bestvideo+bestaudio needs ffmpeg; without it yt-dlp reports
+    # "Requested format is not available". Point it at the bundled binary when
+    # there is no system install.
+    if not shutil.which("ffmpeg"):
+        cmd += ["--ffmpeg-location", ffmpeg_executable()]
 
     result = subprocess.run(cmd, check=False, capture_output=True, text=True)
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -205,7 +224,11 @@ def detect_scenes(video_path: Path, threshold: float) -> List[Tuple[float, float
     manager = SceneManager()
     manager.add_detector(ContentDetector(threshold=threshold))
     manager.detect_scenes(video=video, show_progress=True)
-    scene_list = manager.get_scene_list()
+    # start_in_scene=True is essential: by default PySceneDetect returns an EMPTY
+    # list when it finds no cuts, so a single-shot talking-head broadcast - the best
+    # possible lip-reading material - silently yields zero clips. With it, a cut-free
+    # video comes back as one scene spanning the whole file.
+    scene_list = manager.get_scene_list(start_in_scene=True)
 
     scenes: List[Tuple[float, float]] = []
     for start_tc, end_tc in scene_list:
@@ -217,15 +240,25 @@ def detect_scenes(video_path: Path, threshold: float) -> List[Tuple[float, float
 
 
 def sample_times(start_sec: float, end_sec: float, sample_count: int) -> List[float]:
+    """Frame times used to certify "only the target appears" in a scene.
+
+    sample_count is a floor, not a fixed number: now that cut-free videos come back
+    as one scene spanning the whole file, a fixed 5 samples would be certifying a
+    40-minute broadcast off five frames. Scale with duration, but bound it - every
+    sample costs a HOG face detection (~1 s at 1080p) across thousands of videos.
+    """
     duration = end_sec - start_sec
     if duration <= 0:
         return []
-    if sample_count <= 1:
+
+    effective = max(sample_count, math.ceil(duration / SECONDS_PER_SAMPLE))
+    effective = min(effective, MAX_SAMPLES)
+    if effective <= 1:
         return [start_sec + duration * 0.5]
 
     times: List[float] = []
-    for i in range(sample_count):
-        ratio = (i + 1) / (sample_count + 1)
+    for i in range(effective):
+        ratio = (i + 1) / (effective + 1)
         times.append(start_sec + (duration * ratio))
     return times
 

@@ -4,13 +4,22 @@ video_links.csv columns: url, channel, start, end, pipeline, reporter
   pipeline == 1  -> download + Whisper ASR (existing pipeline, untouched)
   pipeline == 2  -> solo-presenter filter -> clips -> per-clip Whisper transcripts
 
+Pipeline-2 source videos are DELETED as soon as their clips are exported, so a
+full-CSV run never accumulates raw footage on disk (--keep-source opts out).
+
 Full run (processes every row):
-    venv/bin/python scripts/run_all.py
-    venv/bin/python scripts/run_all.py --whisper-model small
+    uv run python scripts/run_all.py
+    uv run python scripts/run_all.py --whisper-model small
+    uv run python scripts/run_all.py --limit 10        # first 10 rows after filtering
+    uv run python scripts/run_all.py --exclude-reporters cuneyt_ozdemir
+    uv run python scripts/run_all.py --reporters cem_ogretir can_okanar
+    uv run python scripts/run_all.py --pipeline 2
 
 Quick test (shortest video per reporter for pipeline 2 + shortest pipeline-1 video):
-    venv/bin/python scripts/run_all.py --test
-    venv/bin/python scripts/run_all.py --test --reporters fatih_portakal pipeline1 --whisper-model base
+    uv run python scripts/run_all.py --test
+    uv run python scripts/run_all.py --test --reporters fatih_portakal pipeline1 --whisper-model base
+
+For a full end-to-end smoke test over the first N CSV rows, use scripts/test_data_pipe.py.
 
 Pipeline-2 results land in a single CSV (data/reporter_clips.csv): one row per kept
 clip with its transcript text + transcript JSON path. Test outputs go to data/quick_test/.
@@ -45,8 +54,8 @@ LINK_FIELDS = ["url", "channel", "start", "end", "pipeline", "reporter", "comple
 
 # ---------- shared helpers ----------
 
-def read_rows():
-    with open(VIDEO_LINKS, newline="", encoding="utf-8") as f:
+def read_rows(links_csv=VIDEO_LINKS):
+    with open(links_csv, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
@@ -62,19 +71,19 @@ def is_completed(row):
     return col(row, "completed") == "1"
 
 
-def write_all_rows(rows):
+def write_all_rows(rows, links_csv=VIDEO_LINKS):
     """Persist the full video_links.csv (all columns), preserving the completed flag."""
-    with open(VIDEO_LINKS, "w", newline="", encoding="utf-8") as f:
+    with open(links_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=LINK_FIELDS)
         w.writeheader()
         for r in rows:
             w.writerow({k: (r.get(k) or "") for k in LINK_FIELDS})
 
 
-def mark_completed(rows, row):
+def mark_completed(rows, row, links_csv=VIDEO_LINKS):
     """Flag one row completed and rewrite the CSV immediately (interrupt-safe resume)."""
     row["completed"] = "1"
-    write_all_rows(rows)
+    write_all_rows(rows, links_csv)
 
 
 def write_pipeline1_csv(rows, out_csv: Path):
@@ -125,36 +134,47 @@ def transcribe_clips_into(rows, transcripts_dir: Path, model_name):
         clip = PROJECT / cr["clip_file"]
         out_json = transcripts_dir / (Path(cr["clip_file"]).stem + ".json")
         cr["transcript_text"] = pipeline2.transcribe_clip(clip, out_json, model_name)
-        cr["transcript_json"] = str(out_json.relative_to(PROJECT))
+        cr["transcript_json"] = out_json.relative_to(PROJECT).as_posix()
 
 
 # ---------- full run ----------
 
-def run_pipeline1(rows, video_dir, output_dir, model_name):
-    pipe1 = [r for r in by_pipeline(rows, "1") if not is_completed(r)]
+def run_pipeline1(selected, all_rows, links_csv, data_root, video_dir, output_dir,
+                  model_name):
+    pipe1 = [r for r in by_pipeline(selected, "1") if not is_completed(r)]
     if not pipe1:
         print("[pipeline1] no pending rows")
         return
-    tmp = DATA / "_pipeline1_links.csv"
+    tmp = data_root / "_pipeline1_links.csv"
     write_pipeline1_csv(pipe1, tmp)
     print(f"[pipeline1] {len(pipe1)} pending rows -> download + Whisper")
-    download_videos(set(), {}, link_file=str(tmp), video_dir=video_dir)
+    ok_keys = download_videos(set(), {}, link_file=str(tmp), video_dir=video_dir)
     run_whisper.transcribe_videos(video_dir=video_dir, output_dir=output_dir,
                                   model_name=model_name)
-    for r in pipe1:
+    # Only rows whose download actually succeeded are completed; a failed row stays
+    # pending so the next run retries it instead of silently losing the video.
+    done = [r for r in pipe1
+            if (col(r, "url"), col(r, "start"), col(r, "end")) in ok_keys]
+    for r in done:
         r["completed"] = "1"
-    write_all_rows(rows)
-    print(f"[pipeline1] marked {len(pipe1)} rows completed")
+    write_all_rows(all_rows, links_csv)
+    failed = len(pipe1) - len(done)
+    print(f"[pipeline1] marked {len(done)} rows completed"
+          + (f"; {failed} row(s) FAILED and stay pending" if failed else ""))
 
 
-def run_pipeline2(rows, model_name, clips_csv, downloads_dir, clips_root, transcripts_dir):
-    pipe2 = [r for r in by_pipeline(rows, "2") if not is_completed(r)]
+def run_pipeline2(selected, all_rows, links_csv, model_name, clips_csv, downloads_dir,
+                  clips_root, transcripts_dir, delete_source=True):
+    pipe2 = [r for r in by_pipeline(selected, "2") if not is_completed(r)]
     if not pipe2:
         print("[pipeline2] no pending rows")
         return
-    print(f"[pipeline2] {len(pipe2)} pending rows")
+    print(f"[pipeline2] {len(pipe2)} pending rows "
+          f"(source videos {'deleted after clipping' if delete_source else 'KEPT'})")
     enc_cache = {}
-    for r in pipe2:
+    done = failed = 0
+    total = len(pipe2)
+    for i, r in enumerate(pipe2, start=1):
         reporter, url = col(r, "reporter"), col(r, "url")
         if not reporter or not url:
             continue
@@ -162,26 +182,69 @@ def run_pipeline2(rows, model_name, clips_csv, downloads_dir, clips_root, transc
         if not img.exists():
             print(f"[pipeline2] skip {reporter}: missing image {img}")
             continue
-        if reporter not in enc_cache:
-            enc_cache[reporter] = load_reference_encoding(img)
-        clips_dir = clips_root / f"{reporter}_solo_clips"
-        clip_rows = pipeline2.select_clips(url, reporter, enc_cache[reporter],
-                                           downloads_dir, clips_dir)
-        transcribe_clips_into(clip_rows, transcripts_dir, model_name)
-        append_clip_rows(clips_csv, clip_rows)
-        mark_completed(rows, r)   # persist after each video -> safe to interrupt/resume
-        print(f"[pipeline2] {reporter}: {len(clip_rows)} clips from {url} (completed)")
+        try:
+            if reporter not in enc_cache:
+                enc_cache[reporter] = load_reference_encoding(img)
+            clips_dir = clips_root / f"{reporter}_solo_clips"
+            clip_rows = pipeline2.select_clips(url, reporter, enc_cache[reporter],
+                                               downloads_dir, clips_dir,
+                                               delete_source=delete_source)
+            transcribe_clips_into(clip_rows, transcripts_dir, model_name)
+            append_clip_rows(clips_csv, clip_rows)
+            # persist after each video -> safe to interrupt/resume
+            mark_completed(all_rows, r, links_csv)
+            done += 1
+            print(f"[pipeline2] [{i}/{total}] {reporter}: {len(clip_rows)} clips "
+                  f"from {url} (completed)")
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            # A single unavailable/geo-blocked/deleted video must not abort a
+            # 4000-row run. The row stays pending so a later run retries it.
+            failed += 1
+            print(f"[pipeline2] [{i}/{total}] FAILED {reporter} {url}: "
+                  f"{type(exc).__name__}: {exc}")
+    print(f"[pipeline2] finished: {done} completed, {failed} failed (left pending)")
 
 
-def run_full(model_name):
-    rows = read_rows()
-    run_pipeline1(rows, video_dir=str(DATA / "raw_videos"),
-                  output_dir=str(DATA / "transcripts"), model_name=model_name)
-    run_pipeline2(rows, model_name=model_name,
-                  clips_csv=DATA / "reporter_clips.csv",
-                  downloads_dir=DATA / "pipeline2_raw",
-                  clips_root=DATA,
-                  transcripts_dir=DATA / "reporter_transcripts")
+def select_rows(all_rows, pipelines=None, reporters=None, exclude_reporters=None,
+                limit=None):
+    """Filter first, then take the first `limit` of what survives.
+
+    Same order as colab_run_all.ipynb, and it matters: cuneyt_ozdemir occupies CSV rows
+    235-4641, so without a reporter filter a plain run reaches cem_ogretir/can_okanar
+    only after ~4400 videos of one speaker.
+    """
+    rows = all_rows
+    if pipelines:
+        rows = [r for r in rows if col(r, "pipeline") in pipelines]
+    if reporters:
+        rows = [r for r in rows
+                if col(r, "pipeline") != "2" or col(r, "reporter") in reporters]
+    if exclude_reporters:
+        rows = [r for r in rows
+                if col(r, "pipeline") != "2" or col(r, "reporter") not in exclude_reporters]
+    return rows[:limit] if limit else rows
+
+
+def run_full(model_name, links_csv=VIDEO_LINKS, data_root=DATA, limit=None,
+             delete_source=True, pipelines=None, reporters=None,
+             exclude_reporters=None):
+    all_rows = read_rows(links_csv)
+    selected = select_rows(all_rows, pipelines, reporters, exclude_reporters, limit)
+    if len(selected) != len(all_rows):
+        pending = sum(1 for r in selected if not is_completed(r))
+        print(f"[run_all] {len(selected)} of {len(all_rows)} CSV rows selected "
+              f"({pending} still pending)")
+    run_pipeline1(selected, all_rows, links_csv, data_root,
+                  video_dir=str(data_root / "raw_videos"),
+                  output_dir=str(data_root / "transcripts"), model_name=model_name)
+    run_pipeline2(selected, all_rows, links_csv, model_name=model_name,
+                  clips_csv=data_root / "reporter_clips.csv",
+                  downloads_dir=data_root / "pipeline2_raw",
+                  clips_root=data_root,
+                  transcripts_dir=data_root / "reporter_transcripts",
+                  delete_source=delete_source)
 
 
 # ---------- quick test ----------
@@ -269,13 +332,27 @@ def main():
     ap.add_argument("--whisper-model", default="large-v3",
                     help="Whisper model (large-v3 default; use base/small for a fast test)")
     ap.add_argument("--reporters", nargs="*",
-                    help="limit --test to these reporter slugs and/or 'pipeline1'")
+                    help="only these reporter slugs (with --test also accepts 'pipeline1')")
+    ap.add_argument("--exclude-reporters", nargs="*",
+                    help="skip these reporter slugs, e.g. --exclude-reporters cuneyt_ozdemir")
+    ap.add_argument("--pipeline", nargs="*", choices=["1", "2"],
+                    help="only rows of these pipelines")
+    ap.add_argument("--limit", type=int,
+                    help="process only the first N rows left after the other filters")
+    ap.add_argument("--keep-source", action="store_true",
+                    help="keep pipeline-2 source videos after clipping (default: delete "
+                         "them so disk usage stays flat)")
     args = ap.parse_args()
 
     if args.test:
         run_test(args.whisper_model, only=set(args.reporters) if args.reporters else None)
     else:
-        run_full(args.whisper_model)
+        run_full(args.whisper_model, limit=args.limit,
+                 delete_source=not args.keep_source,
+                 pipelines=set(args.pipeline) if args.pipeline else None,
+                 reporters=set(args.reporters) if args.reporters else None,
+                 exclude_reporters=(set(args.exclude_reporters)
+                                    if args.exclude_reporters else None))
 
 
 if __name__ == "__main__":

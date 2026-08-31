@@ -1,3 +1,1 @@
-Delete txt files for single reporters.
 Hacer Hoca - Cloud + server
-Delete the single pipeline, the image and the results for cuneyt

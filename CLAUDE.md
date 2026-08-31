@@ -1,6 +1,6 @@
 # Turkish News Lip Reading Spotting Benchmark
 
-**Goal:** First Turkish visual word-spotting lip-reading benchmark from YouTube news. Word + sentence clips, Whisper ASR, then baseline classifiers + sliding-window spotting. Full plan: `TurkishNewsBrodcasts-LipReadingSpottingBenchmark-ProjectPlan.pdf` (read only if task requires it).
+**Goal:** First Turkish visual word-spotting lip-reading benchmark from YouTube news. Word + sentence clips, Whisper ASR, then baseline classifiers + sliding-window spotting. Full plan: `TurkishNewsBrodcasts-LipReadingSpottingBenchmark-ProjectPlan.pdf` (read only if task requires it). Phase 2 design: `plans/PHASE2_PLAN.md`.
 
 ---
 
@@ -8,20 +8,101 @@
 
 ```
 turkish-lipreading-dataset/
-├── video_links.csv          ← main pipeline input (url, channel, start, end)
-├── linkCNN.txt              ← presenter pilot URLs (one per line)
-├── c.webp                   ← reference face for presenter pilot
-├── requirements.txt
+├── video_links.csv              ← SINGLE input for both pipelines
+├── pyproject.toml               ← uv-managed dependencies
+├── .python-version              ← 3.12
+├── uv.lock                      ← committed lockfile
+├── pipeline2_reporter_pictures/ ← reference face photo per reporter (<slug>.jpeg)
+├── plans/PHASE2_PLAN.md
+├── colab_run_all.ipynb          ← Colab GPU runner (self-contained reimplementation)
 ├── scripts/
-│   ├── download_and_transcribe.py   ← Phase 1 entry point
-│   ├── download_videos.py
-│   ├── run_whisper.py
-│   └── pipeline_cuneyt_solo.py      ← presenter/scene filter pilot
-└── data/                    ← gitignored except tracked CSVs
-    ├── raw_videos/
-    ├── transcripts/         ← per-video JSON from Whisper
-    └── cuneyt_solo_clips/   ← filtered clips + scene_boundaries.csv
+│   ├── run_all.py               ← MAIN ENTRY POINT (dispatches rows to pipeline 1 / 2)
+│   ├── test_data_pipe.py        ← isolated smoke test over the first N CSV rows
+│   ├── download_videos.py       ← pipeline 1 downloader
+│   ├── run_whisper.py           ← Whisper ASR + NFC/strip normalization
+│   ├── download_and_transcribe.py  ← older pipeline-1-only entry point
+│   ├── pipeline2.py             ← pipeline 2 orchestration + per-clip Whisper
+│   └── presenter_filter.py      ← pipeline 2 ENGINE (download, scene detect, face filter)
+└── data/                        ← ALL generated; gitignored. Nothing is placed here by hand.
 ```
+
+`video_links.csv` is the **only** source of URLs. The per-reporter `reporter_links/*.txt`
+files and the `build_video_links.py` / `run_reporters.py` / `quick_test_reporters.py`
+scripts that consumed them were removed once the CSV became authoritative — add new
+videos by appending rows to the CSV.
+
+---
+
+## Environment (uv)
+
+**Python 3.11 or 3.12 required** — `face_recognition`/dlib have no 3.13+ wheels.
+
+```powershell
+uv sync                              # create .venv from pyproject.toml + uv.lock
+uv run python scripts/run_all.py     # run anything inside the env
+```
+
+Three things in `pyproject.toml` exist for a reason — do not "simplify" them away:
+
+1. `override-dependencies = ["dlib; sys_platform == 'never'"]` — `face_recognition` requires `dlib`, whose PyPI sdist compiles from source and needs VS C++ Build Tools on Windows. `dlib-bin` provides the identical module as a prebuilt wheel.
+2. `setuptools<81` — `face_recognition_models` imports `pkg_resources`, removed in setuptools 81.
+3. `torch` pinned to the `pytorch-cu121` index — PyPI torch is **CPU-only on Windows**. cu121 matches this machine's CUDA 12.2 driver (`nvidia-smi`); cu126/cu128 wheels assume newer drivers.
+
+FFmpeg must be on PATH (`winget install Gyan.FFmpeg`). Both downloaders fall back to the `imageio-ffmpeg` bundled binary via `--ffmpeg-location`, but yt-dlp also wants `ffprobe`, so a real install is preferred.
+
+---
+
+## The two pipelines
+
+`video_links.csv` columns: `url,channel,start,end,pipeline,reporter,completed`.
+The `pipeline` column decides which path a row takes.
+
+### Pipeline 1 — segment ASR (8 rows)
+
+Download the named time range (or the whole video when `start`/`end` are empty) →
+Whisper large-v3 → word-level JSON. **No face filtering, no speaker identity.**
+Overlapping intervals on the same URL are detected and skipped.
+
+### Pipeline 2 — solo-presenter clips (4691 rows)
+
+Download the full broadcast → PySceneDetect scene cuts → keep only scenes where
+**exactly one face** appears and it matches `pipeline2_reporter_pictures/<reporter>.jpeg`
+→ export each kept scene as its own mp4 → Whisper per clip → append to
+`data/reporter_clips.csv`. **The source video is deleted immediately after clip export**
+so disk usage stays flat across a 4691-row run.
+
+Pipeline 2 is the one that matters: its clips are already single-speaker, face-verified
+and carry a `reporter` label (= `speaker_id`), which is what Phases 2/3 need. Pipeline 1
+output cannot enter speaker-independent splits until it passes the same filter.
+
+Both are resumable: a row is flagged `completed=1` in `video_links.csv` the moment it
+finishes and the CSV is rewritten immediately. Failed rows stay pending and are retried.
+
+---
+
+## What lands in `data/`
+
+Everything here is generated. Inputs live at the repo root.
+
+| Path | Written by | Contents |
+|------|-----------|----------|
+| `raw_videos/` | pipeline 1 | `<channel>_<title>_<HHMMSS-HHMMSS>.mp4`. **Kept** — no clip replaces them. |
+| `transcripts/<video>.json` | pipeline 1 | Word-level Whisper JSON for each raw video. |
+| `pipeline2_raw/` | pipeline 2 | Transient source broadcasts. **Deleted after clipping** → normally empty. |
+| `<reporter>_solo_clips/` | pipeline 2 | `<reporter>_<srcvideo>_scene_<idx>_<start>-<end>.mp4` — the dataset material. |
+| `reporter_transcripts/<clip>.json` | pipeline 2 | Per-clip Whisper JSON. Timestamps are **clip-local** (start at 0). |
+| `reporter_clips.csv` | `run_all.append_clip_rows` | Master manifest, one row per kept clip. **The Phase 1 → Phase 2 hand-off.** |
+| `_pipeline1_links.csv` | `run_all` | Temp CSV of pending pipeline-1 rows handed to the downloader. |
+| `test_run/` | `test_data_pipe.py` | Isolated copy of all of the above; the real CSV is never touched. |
+
+`reporter_clips.csv` columns: `reporter, source_url, source_video, clip_file, start_sec,
+end_sec, duration_sec, transcript_text, transcript_json`. Paths are stored posix-style so
+a manifest written on Windows is readable on Colab/Linux.
+
+Transcript JSON schema (read-only contract for Phase 2):
+`segments[] → {start_sec, end_sec, text, words[]}`, each word
+`{surface_form, lemma, start_sec, end_sec, confidence, manual_review}`.
+`lemma == surface_form` for now (TODO: zeyrek). `manual_review = 1` when `confidence < 0.7`.
 
 ---
 
@@ -29,59 +110,33 @@ turkish-lipreading-dataset/
 
 | Phase | Status |
 |-------|--------|
-| 1 — Download + Whisper ASR | In progress (scripts done, small CSV sample) |
-| 1b — Presenter solo filter | Started (CNN/Cüneyt pilot) |
-| 2 — Lip extraction + SyncNet | Not started |
+| 1 — Download + Whisper ASR | Both pipelines verified end-to-end by `test_data_pipe.py`. Full run not yet done (`completed` empty on all 4699 rows). |
+| 2 — Lip extraction + SyncNet | Designed in `plans/PHASE2_PLAN.md`, no code |
 | 3 — Dataset splits + benchmark | Not started |
 | 4–5 — Models + release | Not started |
 
----
-    
-## Two Ingestion Pipelines
-
-### A — Main (CSV → ASR)
-
-`video_links.csv` columns: `url,channel,start,end`. Empty start/end = full video. Overlapping intervals on same URL are skipped automatically.
-
-Channels (target ≥25 h each): TRT Haber, CNN Türk, NTV, Habertürk.
-
-Run: `python scripts/download_and_transcribe.py`
-
-Transcript JSON (`data/transcripts/<video>.json`): segments with `words[]` → `surface_form`, `lemma` (TODO: zeyrek), `start_sec`, `end_sec`, `confidence`, `manual_review` (1 if confidence < 0.7).
-
-### B — Presenter solo filter (pilot)
-
-Downloads videos from `linkCNN.txt`, detects scene cuts (PySceneDetect), samples 3 frames per scene, and keeps only scenes where exactly one face appears and it matches `c.webp` (face_recognition, tolerance 0.47). Passing clips are exported via ffmpeg.
-
-Run: `python scripts/pipeline_cuneyt_solo.py`
-
-Outputs: `data/cuneyt_solo_clips/*.mp4`, `scene_boundaries.csv` (kept scenes + `TOTAL_KEPT` duration row).
-
-**Requires Python 3.11 or 3.12** (face_recognition/dlib not supported on 3.13+).
+Known gaps: `lemma == surface_form` (zeyrek pending); `channel` is not propagated into
+`reporter_clips.csv` (see PHASE2_PLAN §1.2); 4407 of 4691 pipeline-2 rows are a single
+speaker (Cüneyt Özdemir), which strains speaker-independent splits.
 
 ---
 
-## Phase Checklist
+## Non-obvious invariants — do not regress these
 
-### Phase 1 — Data collection & ASR
-- [x] yt-dlp downloader (overlap skip, existing-file skip)
-- [x] Whisper large-v3 + word timestamps + NFC normalization
-- [x] Presenter solo pilot pipeline
-- [ ] ≥100 h qualifying video across main channels
-- [ ] ASR on all segments
-- [ ] Lemma extraction via zeyrek (currently `lemma == surface_form`)
-
-### Phase 2 — Visual processing
-- [ ] MediaPipe Face Mesh → lip crop 88×88 grayscale (LRW standard)
-- [ ] Face re-verify every 15 frames; SyncNet discard if score < 3
-- [ ] Word clips (±15 frames) → `word_clips/`; sentence clips (1–8 s) → `sentence_clips/`
-
-### Phase 3 — Benchmark
-- [ ] Vocab: ≥300 examples/class → 500+ classes, 150k+ word clips
-- [ ] Splits 80/10/10 (val: speaker-independent; test: speaker + channel independent)
-
-### Phases 4–5
-Baselines: 3D CNN+BiGRU, ResNet-18+MS-TCN, VTP/SwinLip, AV-HuBERT+LoRA → sliding-window spotting (29-frame window, stride 4) → HuggingFace release (lip crops + metadata only, no raw video/audio).
+1. **`get_scene_list(start_in_scene=True)`** in `presenter_filter.detect_scenes`. Without
+   it PySceneDetect returns an EMPTY list for a video with no cuts, so single-shot
+   talking-head broadcasts — the best lip-reading material — silently yield zero clips.
+2. **`sample_times` scales with duration** (one identity check per 30 s, capped at 20).
+   Scenes can now span a whole video; a fixed 5 frames would certify a 40-minute
+   broadcast off five samples. The cap matters: each sample is a ~1 s HOG detection.
+3. **`DOWNLOAD_FORMAT` requires >=720p**, deliberately. Sub-720p sources are skipped
+   (row left pending), not downscaled into the dataset.
+4. **`run_pipeline2` catches per-row exceptions.** One unavailable video must never abort
+   a 4691-row run.
+5. **Only successfully downloaded pipeline-1 rows are marked completed** —
+   `download_videos()` returns the set of keys that need no further work.
+6. **`normalize_text` strips.** Whisper word tokens carry a leading space; without the
+   strip, " Yargı" and "Yargı" become two word classes in Phase 3.
 
 ---
 
@@ -89,9 +144,9 @@ Baselines: 3D CNN+BiGRU, ResNet-18+MS-TCN, VTP/SwinLip, AV-HuBERT+LoRA → slidi
 
 1. **Minimal scope** — only the requested phase/step.
 2. **Match existing scripts** — paths, JSON schema, Turkish NFC normalization.
-3. **Never commit** `data/raw_videos/`, `data/transcripts/`, `*.mp4`, raw footage.
+3. **Never commit** `data/`, `*.mp4`, raw footage.
 4. **Copyright** — publish mouth ROI crops only, not raw video.
-5. **Deps** — `requirements.txt` (yt-dlp, whisper, torch, opencv, scenedetect, face_recognition, imageio-ffmpeg).
+5. **Deps** — `pyproject.toml` via uv, not bare pip.
 
 ## Key Targets
 
@@ -102,5 +157,25 @@ Baselines: 3D CNN+BiGRU, ResNet-18+MS-TCN, VTP/SwinLip, AV-HuBERT+LoRA → slidi
 | Word clips | 150,000+ |
 | Min examples/class | 300 (train) |
 | Lip crop | 88×88 grayscale |
+| Source resolution | ≥720p |
 | ASR review flag | confidence < 0.7 |
 | SyncNet discard | score < 3 |
+
+---
+
+## Runtime reality (measured, RTX A4000 + CUDA 12.2)
+
+Whisper large-v3 runs at **2.63x realtime on GPU**, ~0.4x on CPU. A 35-video sample of
+`video_links.csv` averages 20.5 min, so the whole CSV is ~1600 h of audio:
+**~5-6 weeks serial for everything, ~2.5 days excluding `cuneyt_ozdemir`.**
+
+`cuneyt_ozdemir` occupies CSV rows 235-4641 and is 94% of the corpus, so an unfiltered
+run reaches `cem_ogretir`/`can_okanar` only at the very end. Use the row filters:
+
+```powershell
+uv run python scripts/run_all.py --exclude-reporters cuneyt_ozdemir
+uv run python scripts/run_all.py --reporters cem_ogretir can_okanar
+uv run python scripts/run_all.py --pipeline 2 --limit 50
+```
+
+Filters apply before `--limit`, matching `colab_run_all.ipynb`'s MAX_ROWS semantics.

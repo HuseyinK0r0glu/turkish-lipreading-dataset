@@ -1,0 +1,45 @@
+[project]
+name = "turkish-lipreading-dataset"
+version = "0.1.0"
+description = "Turkish news lip-reading spotting benchmark - data collection and ASR pipelines"
+readme = "README.md"
+# face_recognition / dlib have no wheels for 3.13+, and mediapipe (Phase 2) has the
+# same constraint.
+requires-python = ">=3.11,<3.13"
+
+dependencies = [
+    "yt-dlp",
+    "openai-whisper",
+    "torch==2.5.1",
+    "numpy",
+    "pandas",
+    "tqdm",
+    "opencv-python",
+    "scenedetect[opencv]",
+    "face-recognition",
+    "dlib-bin",
+    "imageio-ffmpeg",
+    # face_recognition_models still imports pkg_resources, which setuptools 81 removed.
+    "setuptools<81",
+]
+
+[tool.uv]
+# This repo is a set of scripts, not an installable library: manage dependencies only,
+# don't try to build/install the project itself.
+package = false
+
+# face_recognition declares a dependency on `dlib`, whose PyPI sdist compiles from
+# source and needs Visual Studio C++ Build Tools on Windows. `dlib-bin` ships the
+# identical module as a prebuilt wheel, so the source dependency is dropped here and
+# dlib-bin (a real dependency above) provides the `dlib` import.
+override-dependencies = ["dlib; sys_platform == 'never'"]
+
+# torch from PyPI is CPU-only on Windows. cu121 matches the CUDA 12.2 driver exactly;
+# newer cu126/cu128 wheels assume a newer driver. Check yours with `nvidia-smi`.
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
