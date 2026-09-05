@@ -1,6 +1,7 @@
 import argparse
 import csv
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -40,6 +41,34 @@ DOWNLOAD_FORMAT = "bestvideo[height>=720]+bestaudio/best[height>=720]"
 SECONDS_PER_SAMPLE = 30.0
 MAX_SAMPLES = 20
 
+# Wall-clock ceilings for the two steps that can block forever. Neither raises on
+# its own: yt-dlp waits on the network, and OpenCV spins in C code no Python
+# exception can reach, so a single bad video hangs an unattended 4691-row run.
+DOWNLOAD_TIMEOUT = 3600.0
+PROBE_TIMEOUT = 30.0
+
+# Age-restricted videos fail with "Sign in to confirm your age" unless yt-dlp can
+# present a logged-in YouTube session. Two sources, in this order:
+#   1. cookies.txt at the repo root            -> --cookies
+#   2. $YTDLP_COOKIES_FROM_BROWSER (e.g. "edge") -> --cookies-from-browser
+# The file is preferred because live browser extraction is unreliable on Windows:
+# Chrome 127+ encrypts its cookie DB with App-Bound Encryption (yt-dlp #10927) and
+# any running Chromium holds a lock on it (#7271). Neither works on this machine.
+COOKIES_FILE = Path(__file__).resolve().parent.parent / "cookies.txt"
+COOKIES_FROM_BROWSER = os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "").strip()
+
+# yt-dlp failures that mean "the cookie source itself is broken", not "this video
+# is unavailable". Matched against stderr so a dead cookie source can be dropped.
+COOKIE_ERROR_RE = re.compile(
+    "cookie database|DPAPI|cookies-from-browser|could not (copy|find|decrypt)",
+    re.IGNORECASE,
+)
+
+# yt-dlp writes one file per stream before merging (*.f136.mp4, *.f251.webm) and
+# leaves them behind when the merge fails. They are never the final output, and the
+# audio-only one is the exact decoder trap PROBE_TIMEOUT exists for, so skip them.
+FORMAT_FRAGMENT_RE = re.compile(r"\.f\d+$")
+
 
 def read_links(links_file: Path) -> List[str]:
     if not links_file.exists():
@@ -61,6 +90,21 @@ def run_cmd(cmd: List[str]) -> None:
 
 def yt_dlp_base_cmd() -> List[str]:
     return [sys.executable, "-m", "yt_dlp"]
+
+
+# Flipped to True the first time a cookie source proves unusable; see download_video.
+_cookies_disabled = False
+
+
+def cookie_args() -> List[str]:
+    """yt-dlp flags for a logged-in YouTube session, or [] when none is configured."""
+    if _cookies_disabled:
+        return []
+    if COOKIES_FILE.exists():
+        return ["--cookies", str(COOKIES_FILE)]
+    if COOKIES_FROM_BROWSER:
+        return ["--cookies-from-browser", COOKIES_FROM_BROWSER]
+    return []
 
 
 def ffmpeg_executable() -> str:
@@ -92,21 +136,45 @@ def extract_video_id(url: str) -> Optional[str]:
     return None
 
 
+# Semicolons, not newlines: this has to survive as one `-c` argument.
+_PROBE_SRC = (
+    "import sys, cv2; "
+    "cap = cv2.VideoCapture(sys.argv[1]); "
+    "ok = cap.isOpened() and cap.read()[0]; "
+    "cap.release(); "
+    "sys.exit(0 if ok else 1)"
+)
+
+
 def is_video_readable(video_path: Path) -> bool:
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        cap.release()
+    """True if OpenCV can actually decode a frame - probed in a killable child.
+
+    An audio-only leftover from a failed merge (*.f251.webm) reports isOpened() ==
+    True, and cap.read() then spins forever inside FFmpeg looking for a video packet
+    that does not exist. That is a C loop: no timeout, thread or signal reaches it,
+    and one such file froze a 284-row run for nine hours at 100% CPU. Give the probe
+    its own process so it can be killed.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _PROBE_SRC, str(video_path)],
+            capture_output=True, timeout=PROBE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"Unreadable (decode probe timed out after {PROBE_TIMEOUT:.0f}s): "
+              f"{video_path.name}")
         return False
-    ok, _ = cap.read()
-    cap.release()
-    return bool(ok)
+    return result.returncode == 0
 
 
 def choose_preferred_video(candidates: Iterable[Path]) -> Optional[Path]:
-    # Prefer common video containers and avoid transient partial files.
+    # Prefer common video containers; skip transient partial files and the
+    # per-stream fragments yt-dlp leaves behind when a merge fails.
     video_ext_order = {".mp4": 0, ".mkv": 1, ".webm": 2, ".mov": 3}
     ordered = sorted(
-        {p.resolve() for p in candidates if p and p.exists() and p.suffix.lower() != ".part"},
+        {p.resolve() for p in candidates
+         if p and p.exists() and p.suffix.lower() != ".part"
+         and not FORMAT_FRAGMENT_RE.search(p.stem)},
         key=lambda p: (video_ext_order.get(p.suffix.lower(), 99), -p.stat().st_mtime),
     )
     for path in ordered:
@@ -151,6 +219,7 @@ def resolve_downloaded_video_path(url: str, downloads_dir: Path, stdout_lines: L
 
 
 def download_video(url: str, downloads_dir: Path) -> Path:
+    global _cookies_disabled
     downloads_dir.mkdir(parents=True, exist_ok=True)
     out_template = str(downloads_dir / "%(title).120s_%(id)s.%(ext)s")
 
@@ -172,7 +241,6 @@ def download_video(url: str, downloads_dir: Path) -> Path:
         "before_dl:%(filepath)s",
         "--print",
         "filename:%(filename)s",
-        url,
     ]
 
     # Merging bestvideo+bestaudio needs ffmpeg; without it yt-dlp reports
@@ -181,7 +249,29 @@ def download_video(url: str, downloads_dir: Path) -> Path:
     if not shutil.which("ffmpeg"):
         cmd += ["--ffmpeg-location", ffmpeg_executable()]
 
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    def attempt(extra: List[str]) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(cmd + extra + [url], check=False,
+                                  capture_output=True, text=True,
+                                  timeout=DOWNLOAD_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            # Left pending, not lost: run_all.run_pipeline2 logs the row and moves on.
+            raise RuntimeError(
+                f"yt-dlp timed out after {DOWNLOAD_TIMEOUT:.0f}s for URL: {url}"
+            ) from exc
+
+    cookies = cookie_args()
+    result = attempt(cookies)
+    if cookies and result.returncode != 0 and COOKIE_ERROR_RE.search(result.stderr or ""):
+        # A dead cookie source must not take the run down with it. Without this it
+        # fails EVERY row; having no cookies at all only costs the age-restricted
+        # ones. Drop it for the rest of the process and retry once.
+        _cookies_disabled = True
+        tail = (result.stderr or "").strip().splitlines()
+        print("Cookie source unusable, continuing without cookies: "
+              + (tail[-1] if tail else "(no stderr)"))
+        result = attempt([])
+
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     downloaded = resolve_downloaded_video_path(url, downloads_dir, lines)
     if result.returncode != 0 and downloaded:

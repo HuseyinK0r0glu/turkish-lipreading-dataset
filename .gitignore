@@ -7,3 +7,5 @@ __pycache__/
 # legacy pip venvs, superseded by uv
 venv/
 venv311/
+# YouTube session cookies - CREDENTIALS, never commit
+cookies.txt

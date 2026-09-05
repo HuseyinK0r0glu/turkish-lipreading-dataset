@@ -9,6 +9,8 @@
 ```
 turkish-lipreading-dataset/
 ├── video_links.csv              ← SINGLE input for both pipelines
+├── cookies.txt                  ← OPTIONAL, gitignored. Netscape-format YouTube
+│                                  session; without it age-restricted videos fail
 ├── pyproject.toml               ← uv-managed dependencies
 ├── .python-version              ← 3.12
 ├── uv.lock                      ← committed lockfile
@@ -17,6 +19,7 @@ turkish-lipreading-dataset/
 ├── colab_run_all.ipynb          ← Colab GPU runner (self-contained reimplementation)
 ├── scripts/
 │   ├── run_all.py               ← MAIN ENTRY POINT (dispatches rows to pipeline 1 / 2)
+│   ├── run_status.py            ← read-only progress/ETA snapshot of a live run
 │   ├── test_data_pipe.py        ← isolated smoke test over the first N CSV rows
 │   ├── download_videos.py       ← pipeline 1 downloader
 │   ├── run_whisper.py           ← Whisper ASR + NFC/strip normalization
@@ -77,6 +80,14 @@ output cannot enter speaker-independent splits until it passes the same filter.
 
 Both are resumable: a row is flagged `completed=1` in `video_links.csv` the moment it
 finishes and the CSV is rewritten immediately. Failed rows stay pending and are retried.
+
+**Age-restricted videos** ("Sign in to confirm your age") need a logged-in session.
+`presenter_filter.cookie_args` looks for `cookies.txt` at the repo root first, then
+`$YTDLP_COOKIES_FROM_BROWSER` (e.g. `edge`). Prefer the file: on this machine Chrome's
+App-Bound Encryption blocks extraction (yt-dlp #10927) and a running Edge holds a lock
+on its cookie DB (#7271). A cookie source that turns out to be broken is dropped after
+the first failure and the download is retried without it — otherwise one bad cookie
+source would fail *every* row, not just the age-restricted ones.
 
 ---
 
