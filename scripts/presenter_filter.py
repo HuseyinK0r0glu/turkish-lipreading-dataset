@@ -44,7 +44,11 @@ MAX_SAMPLES = 20
 # Wall-clock ceilings for the two steps that can block forever. Neither raises on
 # its own: yt-dlp waits on the network, and OpenCV spins in C code no Python
 # exception can reach, so a single bad video hangs an unattended 4691-row run.
-DOWNLOAD_TIMEOUT = 3600.0
+# 4 h, not 1: a 3 GB 1080p60 broadcast on a ~850 KB/s link needs well over an hour,
+# and the 1 h ceiling this started at killed one such download mid-transfer. The
+# timeout only has to catch a download that will never end (a livestream), so it can
+# afford to be generous.
+DOWNLOAD_TIMEOUT = 14400.0
 PROBE_TIMEOUT = 30.0
 
 # Age-restricted videos fail with "Sign in to confirm your age" unless yt-dlp can
