@@ -63,8 +63,13 @@ COOKIES_FROM_BROWSER = os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "").strip()
 
 # yt-dlp failures that mean "the cookie source itself is broken", not "this video
 # is unavailable". Matched against stderr so a dead cookie source can be dropped.
+# "no longer valid" fires when the exported cookies got rotated (YouTube does this
+# within minutes if the source browser stays signed in); "confirm you're not a bot"
+# is what a stale/rotated cookie gets treated as — worse than sending no cookies at
+# all, so both must drop the source instead of poisoning every remaining row.
 COOKIE_ERROR_RE = re.compile(
-    "cookie database|DPAPI|cookies-from-browser|could not (copy|find|decrypt)",
+    "cookie database|DPAPI|cookies-from-browser|could not (copy|find|decrypt)"
+    "|no longer valid|confirm (you.re|you are) not a bot",
     re.IGNORECASE,
 )
 
