@@ -8,7 +8,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.13"
 
 dependencies = [
-    "yt-dlp",
+    "yt-dlp[default]",
     "openai-whisper",
     "torch==2.5.1",
     "numpy",
