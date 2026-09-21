@@ -37,9 +37,27 @@ if sys.version_info >= (3, 13):
 # resolutions instead.
 DOWNLOAD_FORMAT = "bestvideo[height>=720]+bestaudio/best[height>=720]"
 
-# Identity-check sampling density for long scenes (see sample_times).
+# Identity-check sampling density (see sample_grid). One check per 30 s of scene.
+# The cap used to be 20 samples, which made sense while the samples were an
+# all-or-nothing vote on the whole scene. They are now the grid the scene is CUT
+# along (see solo_segments), so density has to follow duration -- the cap is only
+# a guard against a pathological input such as a multi-hour livestream.
 SECONDS_PER_SAMPLE = 30.0
-MAX_SAMPLES = 20
+MAX_SAMPLES = 480
+
+# Minimum detection height, as a fraction of frame height, for a face to be treated
+# as a person on set at all. HOG hallucinates faces in wall art: on a Deniz Zeyrek
+# frame it reported a second "face" 36 px tall (3.3% of a 1080p frame) on the
+# decorative map behind him, next to his real 321 px face -- and the old
+# all-or-nothing filter threw away the other 34.7 minutes of clean single-presenter
+# monologue over it. The floor sits below the smallest real framing measured in this
+# corpus (Ozlem Gurses at 72 px, 6.7% of frame) and far above that artifact.
+#
+# This is a FALSE-POSITIVE filter, not the lip-crop quality gate: an 88x88 mouth
+# crop wants a face around 260 px, and enforcing that here would drop a lot of
+# otherwise usable broadcast material. A real second presenter, split screen
+# included, is nowhere near this small and is still caught.
+MIN_FACE_FRACTION = 0.05
 
 # Wall-clock ceilings for the two steps that can block forever. Neither raises on
 # its own: yt-dlp waits on the network, and OpenCV spins in C code no Python
@@ -338,28 +356,27 @@ def detect_scenes(video_path: Path, threshold: float) -> List[Tuple[float, float
     return scenes
 
 
-def sample_times(start_sec: float, end_sec: float, sample_count: int) -> List[float]:
-    """Frame times used to certify "only the target appears" in a scene.
+def sample_grid(start_sec: float, end_sec: float,
+                sample_count: int) -> Tuple[List[float], float]:
+    """Identity-check times for a scene, plus the half-width each one certifies.
 
-    sample_count is a floor, not a fixed number: now that cut-free videos come back
-    as one scene spanning the whole file, a fixed 5 samples would be certifying a
-    40-minute broadcast off five frames. Scale with duration, but bound it - every
-    sample costs a HOG face detection (~1 s at 1080p) across thousands of videos.
+    The scene is divided into equal cells and one frame is sampled at the centre of
+    each, so every cell is certified by exactly one sample and the cells tile the
+    scene without overlap. sample_count is a floor, not a fixed number: a cut-free
+    video comes back as one scene spanning the whole file, and five frames cannot
+    speak for a 40-minute broadcast.
+
+    Returns (centre times, half cell width).
     """
     duration = end_sec - start_sec
     if duration <= 0:
-        return []
+        return [], 0.0
 
-    effective = max(sample_count, math.ceil(duration / SECONDS_PER_SAMPLE))
-    effective = min(effective, MAX_SAMPLES)
-    if effective <= 1:
-        return [start_sec + duration * 0.5]
-
-    times: List[float] = []
-    for i in range(effective):
-        ratio = (i + 1) / (effective + 1)
-        times.append(start_sec + (duration * ratio))
-    return times
+    cells = max(sample_count, math.ceil(duration / SECONDS_PER_SAMPLE))
+    cells = min(cells, MAX_SAMPLES)
+    step = duration / cells
+    times = [start_sec + step * (i + 0.5) for i in range(cells)]
+    return times, step / 2.0
 
 
 def extract_frame_rgb(cap: cv2.VideoCapture, time_sec: float):
@@ -370,41 +387,93 @@ def extract_frame_rgb(cap: cv2.VideoCapture, time_sec: float):
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
-def scene_has_only_target(
+def presenter_sized_faces(frame_rgb) -> List[Tuple[int, int, int, int]]:
+    """HOG detections large enough to be a person on set, not a face in wall art.
+
+    See MIN_FACE_FRACTION. Returns (top, right, bottom, left) boxes.
+    """
+    floor_px = frame_rgb.shape[0] * MIN_FACE_FRACTION
+    return [box for box in face_recognition.face_locations(frame_rgb, model="hog")
+            if (box[2] - box[0]) >= floor_px]
+
+
+def solo_segments(
     cap: cv2.VideoCapture,
     start_sec: float,
     end_sec: float,
     target_encoding,
     sample_count: int,
     tolerance: float,
-) -> bool:
-    times = sample_times(start_sec, end_sec, sample_count)
-    found_target_single = False
+) -> List[Tuple[float, float]]:
+    """Sub-ranges of a scene in which only the target reporter appears.
 
+    This used to be a whole-scene yes/no vote that returned False the moment any
+    sample showed a second face. Combined with get_scene_list(start_in_scene=True) -
+    which makes a cut-free broadcast ONE scene covering the whole file - that meant
+    a single two-face insert discarded everything: measured on a 34.7-minute Deniz
+    Zeyrek monologue, samples 1-6 matched him at distance 0.33-0.45 and sample 7
+    caught a two-face graphic, so all 34.7 minutes were thrown away and the video
+    yielded zero clips. It is also why the long formats already in the corpus sit at
+    2-13% usable while the 7-minute Fatih Portakal videos reach 75%.
+
+    So each sample now certifies only its own cell of the scene. A cell whose sample
+    shows a second face, a different face, or no face at all is dropped, and
+    surviving neighbours are merged back into contiguous ranges. That monologue
+    loses the one 30-second cell instead of the whole broadcast.
+
+    "Exactly one face" means exactly one presenter-sized face: see
+    presenter_sized_faces, which ignores detections too small to be a person on set.
+    A cell with zero such faces is dropped like a bad one -- with no mouth on screen
+    it carries no lip-reading signal. A frame that cannot be decoded counts as bad
+    too, so a video OpenCV cannot seek yields nothing rather than unverified clips.
+
+    Verification is therefore only as fine as SECONDS_PER_SAMPLE: the sample sits at
+    its cell's centre, so up to half a cell either side of it is inferred, and an
+    insert shorter than a cell that straddles a boundary can leak a second or two
+    into a kept segment. Lower SECONDS_PER_SAMPLE to tighten that, at one extra HOG
+    detection (~1 s at 1080p) per cell added.
+    """
+    times, half = sample_grid(start_sec, end_sec, sample_count)
+    if not times:
+        return []
+
+    good: List[bool] = []
     for t in times:
         frame_rgb = extract_frame_rgb(cap, t)
         if frame_rgb is None:
+            good.append(False)
             continue
 
-        locations = face_recognition.face_locations(frame_rgb, model="hog")
-        face_count = len(locations)
+        locations = presenter_sized_faces(frame_rgb)
+        if len(locations) != 1:
+            good.append(False)
+            continue
 
-        if face_count > 1:
-            return False
+        encoding = face_recognition.face_encodings(
+            frame_rgb, known_face_locations=locations
+        )
+        if not encoding:
+            good.append(False)
+            continue
 
-        if face_count == 1:
-            encoding = face_recognition.face_encodings(
-                frame_rgb, known_face_locations=locations
-            )
-            if not encoding:
-                continue
-            is_match = face_recognition.compare_faces(
-                [target_encoding], encoding[0], tolerance=tolerance
-            )[0]
-            if is_match:
-                found_target_single = True
+        good.append(bool(face_recognition.compare_faces(
+            [target_encoding], encoding[0], tolerance=tolerance
+        )[0]))
 
-    return found_target_single
+    segments: List[Tuple[float, float]] = []
+    run_start: Optional[float] = None
+    for i, ok in enumerate(good):
+        if ok and run_start is None:
+            run_start = times[i] - half
+        elif not ok and run_start is not None:
+            segments.append((run_start, times[i - 1] + half))
+            run_start = None
+    if run_start is not None:
+        segments.append((run_start, times[-1] + half))
+
+    # Cells are derived from the scene bounds, but clamp anyway so a rounding error
+    # can never ask ffmpeg for a range outside the scene.
+    return [(max(start_sec, s), min(end_sec, e)) for s, e in segments]
 
 
 def safe_name(raw: str) -> str:
@@ -468,38 +537,43 @@ def process_video(
     base = safe_name(video_path.stem)
 
     try:
-        for idx, (start_sec, end_sec) in enumerate(scenes, start=1):
-            duration = end_sec - start_sec
-            if duration < min_duration:
+        for idx, (scene_start, scene_end) in enumerate(scenes, start=1):
+            if scene_end - scene_start < min_duration:
                 skipped += 1
                 continue
 
-            keep = scene_has_only_target(
+            segments = solo_segments(
                 cap=cap,
-                start_sec=start_sec,
-                end_sec=end_sec,
+                start_sec=scene_start,
+                end_sec=scene_end,
                 target_encoding=target_encoding,
                 sample_count=sample_count,
                 tolerance=tolerance,
             )
-            if not keep:
+            if not segments:
                 skipped += 1
                 continue
 
-            clip_name = f"{base}_scene_{idx:04d}_{start_sec:.2f}-{end_sec:.2f}.mp4"
-            output_video = output_dir / clip_name
-            export_clip(video_path, output_video, start_sec, end_sec)
-            scene_rows.append(
-                {
-                    "video": video_path.name,
-                    "scene_index": idx,
-                    "start_sec": round(start_sec, 3),
-                    "end_sec": round(end_sec, 3),
-                    "duration_sec": round(duration, 3),
-                }
-            )
-            kept += 1
-            print(f"Kept: {output_video.name}")
+            # One scene can now yield several clips; start-end in the name keeps
+            # them distinct, so the scene index still means the source scene.
+            for start_sec, end_sec in segments:
+                duration = end_sec - start_sec
+                if duration < min_duration:
+                    continue
+                clip_name = f"{base}_scene_{idx:04d}_{start_sec:.2f}-{end_sec:.2f}.mp4"
+                output_video = output_dir / clip_name
+                export_clip(video_path, output_video, start_sec, end_sec)
+                scene_rows.append(
+                    {
+                        "video": video_path.name,
+                        "scene_index": idx,
+                        "start_sec": round(start_sec, 3),
+                        "end_sec": round(end_sec, 3),
+                        "duration_sec": round(duration, 3),
+                    }
+                )
+                kept += 1
+                print(f"Kept: {output_video.name}")
     finally:
         cap.release()
 

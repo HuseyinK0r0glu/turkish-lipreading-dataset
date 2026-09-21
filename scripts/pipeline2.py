@@ -22,7 +22,7 @@ from presenter_filter import (  # noqa: E402
     download_video,
     export_clip,
     safe_name,
-    scene_has_only_target,
+    solo_segments,
 )
 from run_whisper import normalize_text  # noqa: E402
 
@@ -90,26 +90,31 @@ def select_clips(url, reporter, ref_encoding, downloads_dir: Path, clips_dir: Pa
     clips_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     try:
-        for idx, (start_sec, end_sec) in enumerate(scenes, start=1):
-            if end_sec - start_sec < min_duration:
+        for idx, (scene_start, scene_end) in enumerate(scenes, start=1):
+            if scene_end - scene_start < min_duration:
                 continue
-            if not scene_has_only_target(cap, start_sec, end_sec, ref_encoding,
-                                         sample_count, tolerance):
-                continue
-            clip = clips_dir / f"{reporter}_{base}_scene_{idx:04d}_{start_sec:.2f}-{end_sec:.2f}.mp4"
-            export_clip(video_path, clip, start_sec, end_sec)
-            rows.append({
-                "reporter": reporter,
-                "source_url": url,
-                "source_video": video_path.name,
-                # as_posix(): the manifest is the Phase 2 hand-off and is often written
-                # on Windows but read on Colab/Linux, where a backslash path is not a
-                # path separator at all.
-                "clip_file": clip.relative_to(PROJECT).as_posix(),
-                "start_sec": round(start_sec, 3),
-                "end_sec": round(end_sec, 3),
-                "duration_sec": round(end_sec - start_sec, 3),
-            })
+            # A scene can yield several clips: solo_segments cuts it at the samples
+            # where someone else (or nobody) is on screen instead of discarding the
+            # whole scene, which is what a cut-free broadcast needs.
+            for start_sec, end_sec in solo_segments(cap, scene_start, scene_end,
+                                                    ref_encoding, sample_count,
+                                                    tolerance):
+                if end_sec - start_sec < min_duration:
+                    continue
+                clip = clips_dir / f"{reporter}_{base}_scene_{idx:04d}_{start_sec:.2f}-{end_sec:.2f}.mp4"
+                export_clip(video_path, clip, start_sec, end_sec)
+                rows.append({
+                    "reporter": reporter,
+                    "source_url": url,
+                    "source_video": video_path.name,
+                    # as_posix(): the manifest is the Phase 2 hand-off and is often
+                    # written on Windows but read on Colab/Linux, where a backslash
+                    # path is not a path separator at all.
+                    "clip_file": clip.relative_to(PROJECT).as_posix(),
+                    "start_sec": round(start_sec, 3),
+                    "end_sec": round(end_sec, 3),
+                    "duration_sec": round(end_sec - start_sec, 3),
+                })
     finally:
         cap.release()
 

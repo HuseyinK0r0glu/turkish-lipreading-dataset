@@ -21,6 +21,11 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
+# Windows consoles default stdout to cp1252, which can't encode characters like
+# Turkish "İ" that show up in video titles quoted from run_all.log/run_all.err.
+# Without this the report crashes mid-print instead of just showing a "?".
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 PROJECT = Path(__file__).resolve().parent.parent
 LINKS = PROJECT / "video_links.csv"
 DATA = PROJECT / "data"

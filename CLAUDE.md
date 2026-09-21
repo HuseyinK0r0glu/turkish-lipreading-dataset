@@ -137,9 +137,18 @@ speaker (Cüneyt Özdemir), which strains speaker-independent splits.
 1. **`get_scene_list(start_in_scene=True)`** in `presenter_filter.detect_scenes`. Without
    it PySceneDetect returns an EMPTY list for a video with no cuts, so single-shot
    talking-head broadcasts — the best lip-reading material — silently yield zero clips.
-2. **`sample_times` scales with duration** (one identity check per 30 s, capped at 20).
-   Scenes can now span a whole video; a fixed 5 frames would certify a 40-minute
-   broadcast off five samples. The cap matters: each sample is a ~1 s HOG detection.
+2. **`solo_segments` cuts a scene, it does not vote on it.** Because of #1 a cut-free
+   broadcast is ONE scene covering the whole file, so a whole-scene "does only the
+   target appear?" test is all-or-nothing at broadcast granularity — one two-face
+   insert graphic discarded 34.7 minutes of clean single-face monologue and a
+   Deniz Zeyrek video yielded zero clips. `sample_grid` therefore divides the scene
+   into ~30 s cells with one identity check at each centre, and `solo_segments`
+   drops only the failing cells and merges the survivors. A cell with 0 faces or an
+   undecodable frame counts as failing: no mouth on screen, no lip-reading signal,
+   and a video OpenCV cannot seek must yield nothing rather than unverified clips.
+   `MAX_SAMPLES` (480) is now only a guard against a multi-hour livestream — it is
+   no longer a cost cap, because samples are the cut grid, not a vote.
+   `colab_run_all.ipynb` carries the same two functions; keep them in sync.
 3. **`DOWNLOAD_FORMAT` requires >=720p**, deliberately. Sub-720p sources are skipped
    (row left pending), not downscaled into the dataset.
 4. **`run_pipeline2` catches per-row exceptions.** One unavailable video must never abort
