@@ -25,7 +25,13 @@ turkish-lipreading-dataset/
 │   ├── run_whisper.py           ← Whisper ASR + NFC/strip normalization
 │   ├── download_and_transcribe.py  ← older pipeline-1-only entry point
 │   ├── pipeline2.py             ← pipeline 2 orchestration + per-clip Whisper
-│   └── presenter_filter.py      ← pipeline 2 ENGINE (download, scene detect, face filter)
+│   ├── presenter_filter.py      ← pipeline 2 ENGINE (download, scene detect, face filter)
+│   ├── merge_links.py           ← idempotent append into video_links.csv, keeps `completed`
+│   ├── reorder_links.py         ← push a reporter's pending rows to the end of the queue
+│   ├── reset_empty_rows.py      ← un-complete rows that yielded zero clips, so they retry
+│   ├── defer_low_res.py         ← probe pending rows, move sub-720p ones to the end
+│   ├── audit_clip_pose.py       ← re-audit produced clips against MAX_FACE_YAW
+│   └── backfill_face_height.py  ← fill face_height_px on pre-existing manifest rows
 └── data/                        ← ALL generated; gitignored. Nothing is placed here by hand.
 ```
 
@@ -107,8 +113,18 @@ Everything here is generated. Inputs live at the repo root.
 | `test_run/` | `test_data_pipe.py` | Isolated copy of all of the above; the real CSV is never touched. |
 
 `reporter_clips.csv` columns: `reporter, source_url, source_video, clip_file, start_sec,
-end_sec, duration_sec, transcript_text, transcript_json`. Paths are stored posix-style so
-a manifest written on Windows is readable on Colab/Linux.
+end_sec, duration_sec, face_height_px, transcript_text, transcript_json`. Paths are stored
+posix-style so a manifest written on Windows is readable on Colab/Linux.
+
+`face_height_px` is the median presenter face height over the cells a clip spans —
+**recorded, never gated on**. The 88×88 lip crop wants a face around 260 px, but a hard
+floor there would delete whole reporters: measured across the corpus, 18% of clips sit
+under 150 px and 43% under 220 px, and the small ones are the TV studios (`serdar_cebe`
+126 px, `kubra_par` 137 px — 1079 clips at 0.4% pose rejection, the cleanest block there
+is) while the large ones are personal channels (`yilmaz_ozdil` 535 px, `fatih_altayli`
+534 px). So the number travels into the manifest and Phase 2/3 choose their own
+threshold. Empty means unmeasurable, not zero. `scripts/backfill_face_height.py` fills
+it for rows written before the column existed.
 
 Transcript JSON schema (read-only contract for Phase 2):
 `segments[] → {start_sec, end_sec, text, words[]}`, each word
@@ -149,13 +165,27 @@ speaker (Cüneyt Özdemir), which strains speaker-independent splits.
    `MAX_SAMPLES` (480) is now only a guard against a multi-hour livestream — it is
    no longer a cost cap, because samples are the cut grid, not a vote.
    `colab_run_all.ipynb` carries the same two functions; keep them in sync.
-3. **`DOWNLOAD_FORMAT` requires >=720p**, deliberately. Sub-720p sources are skipped
+3. **A cell must pass all four gates**, in `solo_segments`: exactly one
+   *presenter-sized* face (`presenter_sized_faces`, `MIN_FACE_FRACTION` — HOG finds
+   36 px "faces" in wall art and one of those used to disqualify a whole broadcast),
+   that face matches the reporter, and `face_yaw <= MAX_FACE_YAW`. The yaw gate is
+   the plan's "presenter faces the camera directly": without it a 90-degree profile
+   of the presenter talking to an off-camera guest passed every other test, and an
+   audit of 5521 existing clips found 857 (15.5%) over the line — 82% of
+   `osman_gokcek`, 49% of `fatih_altayli`, 40% of `ismail_kucukkaya`, against 0.4%
+   of `kubra_par`. The difference is the studio camera angle, not the presenter.
+   `scripts/audit_clip_pose.py` re-runs that audit over produced clips.
+4. **`load_reference_encoding` takes the LARGEST face, not `encodings[0]`.**
+   Detection order is not size order, so on a photo with background art the first
+   encoding can be the artwork — and then every scene of that reporter is matched
+   against a painting, the rows complete with zero clips, and nothing looks broken.
+5. **`DOWNLOAD_FORMAT` requires >=720p**, deliberately. Sub-720p sources are skipped
    (row left pending), not downscaled into the dataset.
-4. **`run_pipeline2` catches per-row exceptions.** One unavailable video must never abort
+6. **`run_pipeline2` catches per-row exceptions.** One unavailable video must never abort
    a 4691-row run.
-5. **Only successfully downloaded pipeline-1 rows are marked completed** —
+7. **Only successfully downloaded pipeline-1 rows are marked completed** —
    `download_videos()` returns the set of keys that need no further work.
-6. **`normalize_text` strips.** Whisper word tokens carry a leading space; without the
+8. **`normalize_text` strips.** Whisper word tokens carry a leading space; without the
    strip, " Yargı" and "Yargı" become two word classes in Phase 3.
 
 ---

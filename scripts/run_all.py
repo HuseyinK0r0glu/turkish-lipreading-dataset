@@ -47,7 +47,7 @@ VIDEO_LINKS = PROJECT / "video_links.csv"
 DATA = PROJECT / "data"
 QUICK_TEST = DATA / "quick_test"
 CLIP_FIELDS = ["reporter", "source_url", "source_video", "clip_file",
-               "start_sec", "end_sec", "duration_sec",
+               "start_sec", "end_sec", "duration_sec", "face_height_px",
                "transcript_text", "transcript_json"]
 LINK_FIELDS = ["url", "channel", "start", "end", "pipeline", "reporter", "completed"]
 

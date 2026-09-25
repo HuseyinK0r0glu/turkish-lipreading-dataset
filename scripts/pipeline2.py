@@ -71,7 +71,7 @@ def remove_source_video(video_path: Path) -> None:
 
 
 def select_clips(url, reporter, ref_encoding, downloads_dir: Path, clips_dir: Path,
-                 scene_threshold=30.0, sample_count=5, tolerance=0.5, min_duration=1.2,
+                 scene_threshold=30.0, sample_count=1, tolerance=0.5, min_duration=1.2,
                  delete_source=True):
     """Download the video and export clips where only the reporter appears.
 
@@ -96,9 +96,9 @@ def select_clips(url, reporter, ref_encoding, downloads_dir: Path, clips_dir: Pa
             # A scene can yield several clips: solo_segments cuts it at the samples
             # where someone else (or nobody) is on screen instead of discarding the
             # whole scene, which is what a cut-free broadcast needs.
-            for start_sec, end_sec in solo_segments(cap, scene_start, scene_end,
-                                                    ref_encoding, sample_count,
-                                                    tolerance):
+            for start_sec, end_sec, face_h in solo_segments(cap, scene_start,
+                                                            scene_end, ref_encoding,
+                                                            sample_count, tolerance):
                 if end_sec - start_sec < min_duration:
                     continue
                 clip = clips_dir / f"{reporter}_{base}_scene_{idx:04d}_{start_sec:.2f}-{end_sec:.2f}.mp4"
@@ -114,6 +114,9 @@ def select_clips(url, reporter, ref_encoding, downloads_dir: Path, clips_dir: Pa
                     "start_sec": round(start_sec, 3),
                     "end_sec": round(end_sec, 3),
                     "duration_sec": round(end_sec - start_sec, 3),
+                    # Median presenter face height over the cells this clip spans.
+                    # Not gated on -- see presenter_filter.solo_segments.
+                    "face_height_px": face_h,
                 })
     finally:
         cap.release()

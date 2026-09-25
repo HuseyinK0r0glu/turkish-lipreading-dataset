@@ -4,6 +4,7 @@ import math
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -45,19 +46,49 @@ DOWNLOAD_FORMAT = "bestvideo[height>=720]+bestaudio/best[height>=720]"
 SECONDS_PER_SAMPLE = 30.0
 MAX_SAMPLES = 480
 
+# HOG detection runs on a downscaled copy of the frame. It is the expensive half of
+# every identity check -- measured on a 1080p broadcast frame, 1352 ms at full size
+# against 501 ms at half, a 2.7x saving -- and a presenter's head is hundreds of
+# pixels tall, so there is nothing to gain from detecting at full resolution.
+# Encoding and landmarks still run on the full-resolution frame, where they cost
+# little. Lower this further only after re-measuring the floor below.
+DETECT_SCALE = 0.5
+
 # Minimum detection height, as a fraction of frame height, for a face to be treated
 # as a person on set at all. HOG hallucinates faces in wall art: on a Deniz Zeyrek
 # frame it reported a second "face" 36 px tall (3.3% of a 1080p frame) on the
 # decorative map behind him, next to his real 321 px face -- and the old
 # all-or-nothing filter threw away the other 34.7 minutes of clean single-presenter
-# monologue over it. The floor sits below the smallest real framing measured in this
-# corpus (Ozlem Gurses at 72 px, 6.7% of frame) and far above that artifact.
+# monologue over it.
+#
+# The value is pinned to what DETECT_SCALE can actually see, so that there is no
+# band of faces the filter would accept but the detector cannot find -- a gap there
+# would let a real second person through as "solo". Measured by scaling a known face
+# into a blank 1080p frame: at 0.5 scale HOG still finds a 60 px face (5.6%) and
+# misses a 54 px one (5.0%). 0.06 (65 px at 1080p) clears that limit, stays far
+# above the 36 px artifact, and stays below the smallest real framing in this corpus
+# (Ozlem Gurses at 72 px, 6.7%).
 #
 # This is a FALSE-POSITIVE filter, not the lip-crop quality gate: an 88x88 mouth
 # crop wants a face around 260 px, and enforcing that here would drop a lot of
-# otherwise usable broadcast material. A real second presenter, split screen
-# included, is nowhere near this small and is still caught.
-MIN_FACE_FRACTION = 0.05
+# otherwise usable broadcast material.
+MIN_FACE_FRACTION = 0.06
+
+# Maximum lateral head turn for a frame to count as "presenter faces the camera
+# directly", which the project plan requires of every clip. face_yaw returns 0 for
+# a face pointed at the lens and 1 for a full profile. Calibrated on this corpus:
+#   hand-picked frontal reference photos      median 0.064, p90 0.152
+#   clips that read as frontal on review      <= 0.20
+#   clips that read as clearly turned away    >= 0.32
+#   talking to an off-camera guest, profile    0.61 - 0.83
+# 0.30 sits in that gap: twice the frontal p90, under anything that looked turned.
+# A 90-degree profile has no readable mouth at all, so those clips are worse than
+# useless -- they are mislabelled training data.
+#
+# YAW ONLY. An anchor glancing DOWN at a script is pitch, which this does not
+# measure; nor does it police graphic overlays or a face too small for the 88x88
+# lip crop (MIN_FACE_FRACTION is a false-positive floor, not a quality gate).
+MAX_FACE_YAW = 0.30
 
 # Wall-clock ceilings for the two steps that can block forever. Neither raises on
 # its own: yt-dlp waits on the network, and OpenCV spins in C code no Python
@@ -327,11 +358,26 @@ def load_reference_encoding(reference_image: Path):
         raise FileNotFoundError(f"Reference image not found: {reference_image}")
 
     image = face_recognition.load_image_file(str(reference_image))
-    encodings = face_recognition.face_encodings(image)
-    if not encodings:
+    # Largest face, not encodings[0]. HOG finds faces in background art -- the
+    # nagehan_alci photo carries a 36 px detection on a painting next to her 268 px
+    # face -- and detection order is not size order, so taking the first encoding
+    # risks matching every scene of a 300-row reporter against a painting. That
+    # would fail silently: the row completes with zero clips and looks like a video
+    # that simply had no solo footage.
+    locations = face_recognition.face_locations(image, model="hog")
+    if not locations:
         raise RuntimeError(
             f"No face found in reference image: {reference_image}. "
             "Use a frontal, clear face photo."
+        )
+    locations.sort(key=lambda b: b[2] - b[0], reverse=True)
+    if len(locations) > 1:
+        print(f"Reference {reference_image.name}: {len(locations)} faces detected, "
+              f"using the largest ({locations[0][2] - locations[0][0]} px)")
+    encodings = face_recognition.face_encodings(image, known_face_locations=locations[:1])
+    if not encodings:
+        raise RuntimeError(
+            f"Face found but not encodable in reference image: {reference_image}."
         )
     return encodings[0]
 
@@ -362,9 +408,15 @@ def sample_grid(start_sec: float, end_sec: float,
 
     The scene is divided into equal cells and one frame is sampled at the centre of
     each, so every cell is certified by exactly one sample and the cells tile the
-    scene without overlap. sample_count is a floor, not a fixed number: a cut-free
-    video comes back as one scene spanning the whole file, and five frames cannot
-    speak for a 40-minute broadcast.
+    scene without overlap. Density comes from SECONDS_PER_SAMPLE; sample_count is
+    only a floor for scenes shorter than that, and the sane floor is 1.
+
+    A floor of 5 made sense while the samples were an all-or-nothing vote, where
+    more frames meant a safer verdict. Now they are the cut grid, and a scene is one
+    camera shot -- face count and angle do not change inside it -- so five samples
+    of an 8-second shot buy nothing and cost four extra seeks. On a 112-minute
+    bulletin cut into ~800 scenes that was 4000 samples at ~5 s each, 5.7 hours for
+    one video; at a floor of 1 it is ~800.
 
     Returns (centre times, half cell width).
     """
@@ -387,14 +439,48 @@ def extract_frame_rgb(cap: cv2.VideoCapture, time_sec: float):
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
+def face_yaw(frame_rgb, box) -> Optional[float]:
+    """Lateral head turn: 0.0 facing the camera, 1.0 full profile.
+
+    Taken from where the nose tip sits horizontally inside the jaw outline. On a
+    frontal face it is midway between the two jaw edges; as the head turns, the far
+    edge collapses towards it. Cheap (one landmark pass on a box already detected)
+    and stable down to fairly small faces.
+
+    Returns None when landmarks cannot be fitted; callers must treat that as a
+    failure, not a pass -- an unmeasurable face is not a verified frontal one.
+    """
+    marks = face_recognition.face_landmarks(frame_rgb, [box])
+    if not marks:
+        return None
+    chin = marks[0].get("chin")
+    nose = marks[0].get("nose_tip")
+    if not chin or not nose:
+        return None
+    nose_x = sum(p[0] for p in nose) / len(nose)
+    left_x, right_x = chin[0][0], chin[-1][0]
+    d_left, d_right = abs(nose_x - left_x), abs(right_x - nose_x)
+    if d_left + d_right <= 0:
+        return 1.0
+    return abs(d_right - d_left) / (d_right + d_left)
+
+
 def presenter_sized_faces(frame_rgb) -> List[Tuple[int, int, int, int]]:
     """HOG detections large enough to be a person on set, not a face in wall art.
 
-    See MIN_FACE_FRACTION. Returns (top, right, bottom, left) boxes.
+    Detects on a DETECT_SCALE copy and returns boxes in FULL-resolution coordinates,
+    so callers can feed them straight to face_encodings/face_landmarks on the
+    original frame. See MIN_FACE_FRACTION for why the floor is tied to the scale.
     """
     floor_px = frame_rgb.shape[0] * MIN_FACE_FRACTION
-    return [box for box in face_recognition.face_locations(frame_rgb, model="hog")
-            if (box[2] - box[0]) >= floor_px]
+    if DETECT_SCALE >= 1.0:
+        found = face_recognition.face_locations(frame_rgb, model="hog")
+    else:
+        small = cv2.resize(frame_rgb, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
+        inv = 1.0 / DETECT_SCALE
+        found = [tuple(int(round(c * inv)) for c in box)
+                 for box in face_recognition.face_locations(small, model="hog")]
+    return [box for box in found if (box[2] - box[0]) >= floor_px]
 
 
 def solo_segments(
@@ -404,7 +490,7 @@ def solo_segments(
     target_encoding,
     sample_count: int,
     tolerance: float,
-) -> List[Tuple[float, float]]:
+) -> List[Tuple[float, float, int]]:
     """Sub-ranges of a scene in which only the target reporter appears.
 
     This used to be a whole-scene yes/no vote that returned False the moment any
@@ -421,11 +507,12 @@ def solo_segments(
     surviving neighbours are merged back into contiguous ranges. That monologue
     loses the one 30-second cell instead of the whole broadcast.
 
-    "Exactly one face" means exactly one presenter-sized face: see
-    presenter_sized_faces, which ignores detections too small to be a person on set.
-    A cell with zero such faces is dropped like a bad one -- with no mouth on screen
-    it carries no lip-reading signal. A frame that cannot be decoded counts as bad
-    too, so a video OpenCV cannot seek yields nothing rather than unverified clips.
+    A cell passes only if its sample shows exactly one presenter-sized face (see
+    presenter_sized_faces, which ignores detections too small to be a person on
+    set), that face matches the reporter, and it is turned no further from the lens
+    than MAX_FACE_YAW. Everything else fails: zero faces carries no lip-reading
+    signal, and a frame that cannot be decoded or landmarked counts as bad too, so
+    a video OpenCV cannot seek yields nothing rather than unverified clips.
 
     Verification is therefore only as fine as SECONDS_PER_SAMPLE: the sample sits at
     its cell's centre, so up to half a cell either side of it is inferred, and an
@@ -438,42 +525,62 @@ def solo_segments(
         return []
 
     good: List[bool] = []
+    heights: List[Optional[int]] = []
     for t in times:
         frame_rgb = extract_frame_rgb(cap, t)
         if frame_rgb is None:
-            good.append(False)
+            good.append(False); heights.append(None)
             continue
 
         locations = presenter_sized_faces(frame_rgb)
         if len(locations) != 1:
-            good.append(False)
+            good.append(False); heights.append(None)
             continue
 
         encoding = face_recognition.face_encodings(
             frame_rgb, known_face_locations=locations
         )
         if not encoding:
-            good.append(False)
+            good.append(False); heights.append(None)
             continue
 
-        good.append(bool(face_recognition.compare_faces(
+        if not face_recognition.compare_faces(
             [target_encoding], encoding[0], tolerance=tolerance
-        )[0]))
+        )[0]:
+            good.append(False); heights.append(None)
+            continue
 
-    segments: List[Tuple[float, float]] = []
-    run_start: Optional[float] = None
+        # Right person, one of them, facing the camera. A profile shot of the
+        # presenter talking to an off-camera guest passes every other test and is
+        # still unusable, so this is the last gate. See MAX_FACE_YAW.
+        yaw = face_yaw(frame_rgb, locations[0])
+        good.append(yaw is not None and yaw <= MAX_FACE_YAW)
+        # Recorded, not gated on: the 88x88 lip crop wants a face around 260 px and
+        # a hard floor there would delete whole reporters (kubra_par's 1079 clips sit
+        # at 137 px), so the number travels into the manifest and Phase 2/3 pick
+        # their own threshold. See CLIP_FIELDS' face_height_px.
+        heights.append(locations[0][2] - locations[0][0])
+
+    runs: List[Tuple[int, int]] = []
+    run_start_i: Optional[int] = None
     for i, ok in enumerate(good):
-        if ok and run_start is None:
-            run_start = times[i] - half
-        elif not ok and run_start is not None:
-            segments.append((run_start, times[i - 1] + half))
-            run_start = None
-    if run_start is not None:
-        segments.append((run_start, times[-1] + half))
+        if ok and run_start_i is None:
+            run_start_i = i
+        elif not ok and run_start_i is not None:
+            runs.append((run_start_i, i - 1))
+            run_start_i = None
+    if run_start_i is not None:
+        runs.append((run_start_i, len(good) - 1))
 
-    # Cells are derived from the scene bounds, but clamp anyway so a rounding error
-    # can never ask ffmpeg for a range outside the scene.
-    return [(max(start_sec, s), min(end_sec, e)) for s, e in segments]
+    out: List[Tuple[float, float, int]] = []
+    for a, b in runs:
+        hs = [h for h in heights[a:b + 1] if h]
+        # Cells come from the scene bounds, but clamp anyway so a rounding error can
+        # never ask ffmpeg for a range outside the scene.
+        out.append((max(start_sec, times[a] - half),
+                    min(end_sec, times[b] + half),
+                    int(statistics.median(hs)) if hs else 0))
+    return out
 
 
 def safe_name(raw: str) -> str:
@@ -556,7 +663,7 @@ def process_video(
 
             # One scene can now yield several clips; start-end in the name keeps
             # them distinct, so the scene index still means the source scene.
-            for start_sec, end_sec in segments:
+            for start_sec, end_sec, face_h in segments:
                 duration = end_sec - start_sec
                 if duration < min_duration:
                     continue
@@ -570,6 +677,7 @@ def process_video(
                         "start_sec": round(start_sec, 3),
                         "end_sec": round(end_sec, 3),
                         "duration_sec": round(duration, 3),
+                        "face_height_px": face_h,
                     }
                 )
                 kept += 1
@@ -594,7 +702,8 @@ def parse_args():
     parser.add_argument("--downloads-dir", default="data/raw_videos")
     parser.add_argument("--output-dir", default="data/reporter_solo_clips")
     parser.add_argument("--scene-threshold", type=float, default=30.0)
-    parser.add_argument("--sample-count", type=int, default=3)
+    # Floor only; SECONDS_PER_SAMPLE sets the density. See sample_grid.
+    parser.add_argument("--sample-count", type=int, default=1)
     parser.add_argument("--face-tolerance", type=float, default=0.47)
     parser.add_argument("--min-duration", type=float, default=1.2)
     return parser.parse_args()
@@ -633,7 +742,8 @@ def main():
         )
 
     with scene_csv_path.open("w", newline="", encoding="utf-8") as f:
-        fieldnames = ["video", "scene_index", "start_sec", "end_sec", "duration_sec"]
+        fieldnames = ["video", "scene_index", "start_sec", "end_sec", "duration_sec",
+                      "face_height_px"]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(scene_rows)
