@@ -15,6 +15,7 @@ turkish-lipreading-dataset/
 ├── .python-version              ← 3.12
 ├── uv.lock                      ← committed lockfile
 ├── pipeline2_reporter_pictures/ ← reference face photo per reporter (<slug>.jpeg)
+├── models/                     ← YuNet face detector (auto-downloaded if missing)
 ├── plans/PHASE2_PLAN.md
 ├── colab_run_all.ipynb          ← Colab GPU runner (self-contained reimplementation)
 ├── scripts/
@@ -30,7 +31,8 @@ turkish-lipreading-dataset/
 │   ├── reorder_links.py         ← push a reporter's pending rows to the end of the queue
 │   ├── reset_empty_rows.py      ← un-complete rows that yielded zero clips, so they retry
 │   ├── defer_low_res.py         ← probe pending rows, move sub-720p ones to the end
-│   ├── audit_clip_pose.py       ← re-audit produced clips against MAX_FACE_YAW
+│   ├── audit_clips.py           ← re-apply the CURRENT solo rules to produced clips
+│   ├── audit_clip_pose.py       ← older yaw-only audit (superseded by audit_clips.py)
 │   └── backfill_face_height.py  ← fill face_height_px on pre-existing manifest rows
 └── data/                        ← ALL generated; gitignored. Nothing is placed here by hand.
 ```
@@ -74,9 +76,10 @@ Overlapping intervals on the same URL are detected and skipped.
 
 ### Pipeline 2 — solo-presenter clips (4691 rows)
 
-Download the full broadcast → PySceneDetect scene cuts → keep only scenes where
-**exactly one face** appears and it matches `pipeline2_reporter_pictures/<reporter>.jpeg`
-→ export each kept scene as its own mp4 → Whisper per clip → append to
+Download the full broadcast → PySceneDetect scene cuts → sample every 0.2 s and keep
+only the stretches where **exactly one person** is on screen, it matches
+`pipeline2_reporter_pictures/<reporter>.jpeg` and faces the camera (invariant #3)
+→ export each kept stretch (>= 2 s) as its own mp4 → Whisper per clip → append to
 `data/reporter_clips.csv`. **The source video is deleted immediately after clip export**
 so disk usage stays flat across a 4691-row run.
 
@@ -156,25 +159,32 @@ speaker (Cüneyt Özdemir), which strains speaker-independent splits.
 2. **`solo_segments` cuts a scene, it does not vote on it.** Because of #1 a cut-free
    broadcast is ONE scene covering the whole file, so a whole-scene "does only the
    target appear?" test is all-or-nothing at broadcast granularity — one two-face
-   insert graphic discarded 34.7 minutes of clean single-face monologue and a
-   Deniz Zeyrek video yielded zero clips. `sample_grid` therefore divides the scene
-   into ~30 s cells with one identity check at each centre, and `solo_segments`
-   drops only the failing cells and merges the survivors. A cell with 0 faces or an
-   undecodable frame counts as failing: no mouth on screen, no lip-reading signal,
-   and a video OpenCV cannot seek must yield nothing rather than unverified clips.
-   `MAX_SAMPLES` (480) is now only a guard against a multi-hour livestream — it is
-   no longer a cost cap, because samples are the cut grid, not a vote.
-   `colab_run_all.ipynb` carries the same two functions; keep them in sync.
-3. **A cell must pass all four gates**, in `solo_segments`: exactly one
-   *presenter-sized* face (`presenter_sized_faces`, `MIN_FACE_FRACTION` — HOG finds
-   36 px "faces" in wall art and one of those used to disqualify a whole broadcast),
-   that face matches the reporter, and `face_yaw <= MAX_FACE_YAW`. The yaw gate is
-   the plan's "presenter faces the camera directly": without it a 90-degree profile
-   of the presenter talking to an off-camera guest passed every other test, and an
-   audit of 5521 existing clips found 857 (15.5%) over the line — 82% of
-   `osman_gokcek`, 49% of `fatih_altayli`, 40% of `ismail_kucukkaya`, against 0.4%
-   of `kubra_par`. The difference is the studio camera angle, not the presenter.
-   `scripts/audit_clip_pose.py` re-runs that audit over produced clips.
+   insert graphic discarded 34.7 minutes of clean single-face monologue. Each sample
+   certifies only itself; failing samples cut the scene and survivors are merged.
+3. **Every 0.2 s sample must pass all gates** (`analyze_frames` + `solo_segments`):
+   - **exactly one person on set**, counted with **YuNet**, not HOG
+     (`FACE_SCORE_MIN` 0.80, `MIN_FACE_FRACTION` 0.045). The old filter checked ONE
+     HOG frame per 30 s on a half-scale copy; HOG there misses faces under ~120 px,
+     so split screens, a presenter beside a video wall of three politicians, and
+     sign-language interpreter boxes passed as "solo". 0 faces fails too.
+   - **identity voted per track** (same face, no jump > `TRACK_MAX_SHIFT` widths):
+     median dlib distance <= `IDENTITY_TOLERANCE` (0.6, dlib's own). Per-sample distances of the right person
+     wander 0.45-0.83, so a per-sample test shreds clips; a person cut in elsewhere
+     in the frame starts a new track and is voted on alone.
+   - **`face_yaw <= MAX_FACE_YAW` on the sample itself** — the plan's "presenter faces
+     the camera directly". 0.3-0.5 is a clear look away, 0.5+ often a hand over the
+     mouth, 0.9 a profile. Natural head turns do fragment monologues; that is the
+     rule working, not a bug.
+   - `SCENE_EDGE_TRIM` (0.3 s) comes off every scene end: cuts land on transitions
+     (hadi_ozisik glitch wipes, dissolves), and one clip ended in 0.4 s of another man.
+   - clips shorter than `MIN_CLIP_DURATION` (2.0 s) are not exported: Phase 2 word
+     clips are timestamp +-0.6 s, so shorter clips carry no usable word.
+   dlib runs on a box derived from YuNet's (`_dlib_box`, agrees with HOG to ~0.01).
+   Identity encoding is ~200 ms, so it runs every `IDENTITY_EVERY` samples and at
+   each track start; `analyze_video` splits a broadcast into 5-min chunks across CPU
+   cores. `colab_run_all.ipynb` carries the same functions; keep them in sync.
+   `scripts/audit_clips.py` re-applies these rules to already-produced clips (trims
+   to passing parts, slices the transcript without re-running Whisper, drops the rest).
 4. **`load_reference_encoding` takes the LARGEST face, not `encodings[0]`.**
    Detection order is not size order, so on a photo with background art the first
    encoding can be the artwork — and then every scene of that reporter is matched
@@ -226,6 +236,9 @@ run reaches `cem_ogretir`/`can_okanar` only at the very end. Use the row filters
 uv run python scripts/run_all.py --exclude-reporters cuneyt_ozdemir
 uv run python scripts/run_all.py --reporters cem_ogretir can_okanar
 uv run python scripts/run_all.py --pipeline 2 --limit 50
+uv run python scripts/run_all.py --pipeline 2 --reporters cuneyt_ozdemir --max-hours 15
 ```
 
 Filters apply before `--limit`, matching `colab_run_all.ipynb`'s MAX_ROWS semantics.
+`--max-hours` stops pipeline 2 once the selected reporters' clips in
+`reporter_clips.csv` reach that many hours; clips already there count.

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 import cv2
+import numpy as np
 from scenedetect import SceneManager, open_video
 from scenedetect.detectors import ContentDetector
 
@@ -38,41 +39,98 @@ if sys.version_info >= (3, 13):
 # resolutions instead.
 DOWNLOAD_FORMAT = "bestvideo[height>=720]+bestaudio/best[height>=720]"
 
-# Identity-check sampling density (see sample_grid). One check per 30 s of scene.
-# The cap used to be 20 samples, which made sense while the samples were an
-# all-or-nothing vote on the whole scene. They are now the grid the scene is CUT
-# along (see solo_segments), so density has to follow duration -- the cap is only
-# a guard against a pathological input such as a multi-hour livestream.
-SECONDS_PER_SAMPLE = 30.0
-MAX_SAMPLES = 480
-
-# HOG detection runs on a downscaled copy of the frame. It is the expensive half of
-# every identity check -- measured on a 1080p broadcast frame, 1352 ms at full size
-# against 501 ms at half, a 2.7x saving -- and a presenter's head is hundreds of
-# pixels tall, so there is nothing to gain from detecting at full resolution.
-# Encoding and landmarks still run on the full-resolution frame, where they cost
-# little. Lower this further only after re-measuring the floor below.
-DETECT_SCALE = 0.5
-
-# Minimum detection height, as a fraction of frame height, for a face to be treated
-# as a person on set at all. HOG hallucinates faces in wall art: on a Deniz Zeyrek
-# frame it reported a second "face" 36 px tall (3.3% of a 1080p frame) on the
-# decorative map behind him, next to his real 321 px face -- and the old
-# all-or-nothing filter threw away the other 34.7 minutes of clean single-presenter
-# monologue over it.
+# Every verdict is taken on sampled frames read in a single sequential ffmpeg pass
+# (see sample_frames). This used to be one frame per 30 s, each certifying 15 s
+# either side of itself, and an audit of the first 8063 clips found that that is
+# exactly where they leaked: a split screen, a presenter standing beside a video
+# wall of three politicians, or a sign-language interpreter box that the one sample
+# happened to miss, and the whole clip was labelled "solo".
 #
-# The value is pinned to what DETECT_SCALE can actually see, so that there is no
-# band of faces the filter would accept but the detector cannot find -- a gap there
-# would let a real second person through as "solo". Measured by scaling a known face
-# into a blank 1080p frame: at 0.5 scale HOG still finds a 60 px face (5.6%) and
-# misses a 54 px one (5.0%). 0.06 (65 px at 1080p) clears that limit, stays far
-# above the 36 px artifact, and stays below the smallest real framing in this corpus
-# (Ozlem Gurses at 72 px, 6.7%).
+# Faces are COUNTED, and yaw is measured, every SECONDS_PER_SAMPLE (0.2 s): YuNet
+# costs ~10 ms a frame and the 68-point landmark fit behind face_yaw ~1 ms. The dlib
+# identity encoding is the expensive part -- ~200 ms per face on this machine -- so
+# it runs once per IDENTITY_EVERY samples and additionally on the first sample of
+# every new track (see analyze_frames), so a different person cut in for half a
+# second still gets an identity check of its own. That case is real: a hadi_ozisik
+# clip ended in 0.4 s of another man because the scene cut fell on a glitch
+# transition, not on the change of shot. Identity is voted per track (see
+# TRACK_MAX_SHIFT), so one encoding every 2 s is plenty.
+SECONDS_PER_SAMPLE = 0.2
+IDENTITY_EVERY = 10
+
+# Trimmed off both ends of every scene. Cuts land on transitions -- hadi_ozisik's
+# glitch wipes corrupt the first 3-5 frames of each shot, dissolves blend two shots
+# -- and those frames carry no clean mouth. 0.3 s covers every transition measured.
+SCENE_EDGE_TRIM = 0.3
+
+# Shortest clip worth exporting. Phase 2 cuts a word clip as its Whisper timestamp
+# +-0.6 s (the LRW-style 29-frame window) and keeps sentences of 1-8 s, so a clip
+# under ~2 s rarely contains even one word with its full context. 569 of the first
+# 8063 clips were under 2 s, 401 of them hadi_ozisik's jump cuts.
+MIN_CLIP_DURATION = 2.0
+
+# Frames are analysed at no more than this height. fatih_altayli uploads 2160p, and a
+# 4K frame costs 4x the decode and pipe bandwidth for a face that is already ~500 px
+# tall at 1080. Heights reported back (face_height_px) are rescaled to the SOURCE
+# resolution, so they stay comparable with the rows written before this existed.
+ANALYSIS_MAX_HEIGHT = 1080
+
+# Face COUNTING uses OpenCV's YuNet detector, not dlib HOG. HOG on a half-scale frame
+# -- which is what the 30 s grid could afford -- does not see a face under ~120 px:
+# measured on kubra_par's studio shots it found her 137 px face in 0 of 6 frames, and
+# on a Serdar Cebe frame it found him but not the three ~90 px politicians on the
+# video wall beside him, so the frame passed as "exactly one face". YuNet finds all
+# of them at ~10 ms a frame on a 960 px copy, which is what makes per-second sampling
+# affordable. dlib is still used for identity and yaw, on a box derived from YuNet's
+# (see _dlib_box): measured on 24 frames the distances and yaws agree with a native
+# HOG box to within ~0.01.
+YUNET_MODEL = Path(__file__).resolve().parent.parent / "models" / "face_detection_yunet_2023mar.onnx"
+YUNET_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/"
+             "face_detection_yunet/face_detection_yunet_2023mar.onnx")
+DETECT_WIDTH = 960
+# Detections below this score are not even recorded. The counting threshold is
+# FACE_SCORE_MIN; this one only keeps the per-frame record small.
+YUNET_MIN_SCORE = 0.5
+
+# A detection counts as a PERSON ON SET -- and so disqualifies the frame unless it
+# is the only one -- when its score is at least FACE_SCORE_MIN and it is at least
+# MIN_FACE_FRACTION of the frame height. Both were set by reviewing detections on
+# the first 8063 clips (scripts/audit_clips.py).
 #
-# This is a FALSE-POSITIVE filter, not the lip-crop quality gate: an 88x88 mouth
-# crop wants a face around 260 px, and enforcing that here would drop a lot of
-# otherwise usable broadcast material.
-MIN_FACE_FRACTION = 0.06
+# The score floor removes YuNet's false positives, which on this corpus are
+# furniture and decor: a tree trunk (0.69), a desk figurine (0.60), a bust on a
+# bookshelf (0.61). Real faces, including webcam guests in a split screen and an
+# interpreter in a corner box, score 0.85+.
+#
+# The size floor is what separates "another person is on screen" from "a photo on
+# the shelf behind him". It is deliberately LOW: a sign-language interpreter box is
+# ~6% of frame height and a four-way split-screen guest ~9%, and both are the
+# violations this gate exists for.
+FACE_SCORE_MIN = 0.80
+MIN_FACE_FRACTION = 0.045
+
+# Identity is voted per TRACK, not per frame. The reference photos match their own
+# presenter at distances that wander 0.45-0.60 frame to frame (lighting, expression,
+# a studio at 137 px), so a per-second test against tolerance 0.5 would shred a
+# clean monologue into 1-2 s fragments. A track is a run of consecutive samples
+# with exactly one person on set whose face centre moves by less than
+# TRACK_MAX_SHIFT face-widths between samples; it is the reporter when its MEDIAN
+# distance is within tolerance. A different person cut in mid-scene lands somewhere
+# else in the frame, so it starts a new track and is voted on by itself. There is
+# deliberately no per-sample ceiling: on hadi_ozisik every sample reviewed at
+# distance 0.65-0.83 was the presenter himself (profile, sunglasses, outdoor light)
+# or a detector false positive -- a ceiling only discarded good tracks.
+TRACK_MAX_SHIFT = 0.5
+
+# Median track distance at which a track is the reporter. 0.6 is dlib's own
+# same-person threshold. It used to be 0.5, which only worked because the old filter
+# looked at ONE frame per 30 s and a borderline frame sometimes fell under it: the
+# reference photos are not studio stills, and kubra_par's clean, frontal, single-face
+# tracks have a median of 0.50-0.60 (a 40 s clip at 0.5165 was dropped whole at 0.5).
+# Reviewing every track with a median of 0.58-0.78 on fatih_portakal and kubra_par
+# found the presenter in all of them; other people alone on screen (field reporters,
+# interviewees) sit above 0.7.
+IDENTITY_TOLERANCE = 0.6
 
 # Maximum lateral head turn for a frame to count as "presenter faces the camera
 # directly", which the project plan requires of every clip. face_yaw returns 0 for
@@ -402,41 +460,189 @@ def detect_scenes(video_path: Path, threshold: float) -> List[Tuple[float, float
     return scenes
 
 
-def sample_grid(start_sec: float, end_sec: float,
-                sample_count: int) -> Tuple[List[float], float]:
-    """Identity-check times for a scene, plus the half-width each one certifies.
+def sample_frames(video_path: Path, step: float = SECONDS_PER_SAMPLE,
+                  start: float = 0.0, duration: Optional[float] = None):
+    """Yield (time_sec, frame_bgr, source_height) every `step` seconds, sequentially.
 
-    The scene is divided into equal cells and one frame is sampled at the centre of
-    each, so every cell is certified by exactly one sample and the cells tile the
-    scene without overlap. Density comes from SECONDS_PER_SAMPLE; sample_count is
-    only a floor for scenes shorter than that, and the sane floor is 1.
+    `start`/`duration` restrict the pass to one chunk (see analyze_video); times are
+    still absolute. `start` should sit on the step grid so chunks tile it.
 
-    A floor of 5 made sense while the samples were an all-or-nothing vote, where
-    more frames meant a safer verdict. Now they are the cut grid, and a scene is one
-    camera shot -- face count and angle do not change inside it -- so five samples
-    of an 8-second shot buy nothing and cost four extra seeks. On a 112-minute
-    bulletin cut into ~800 scenes that was 4000 samples at ~5 s each, 5.7 hours for
-    one video; at a floor of 1 it is ~800.
-
-    Returns (centre times, half cell width).
+    One ffmpeg decode instead of an OpenCV seek per sample: a seek decodes from the
+    previous keyframe, which at 5 samples a second would decode most of the video
+    several times over. Frames taller than ANALYSIS_MAX_HEIGHT are scaled down;
+    source_height lets callers report sizes in source pixels.
     """
-    duration = end_sec - start_sec
-    if duration <= 0:
-        return [], 0.0
+    cap = cv2.VideoCapture(str(video_path))
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+    if src_w <= 0 or src_h <= 0:
+        raise RuntimeError(f"Cannot read frame size of {video_path}")
+    scale = min(1.0, ANALYSIS_MAX_HEIGHT / src_h)
+    w = max(2, int(round(src_w * scale / 2)) * 2)
+    h = max(2, int(round(src_h * scale / 2)) * 2)
 
-    cells = max(sample_count, math.ceil(duration / SECONDS_PER_SAMPLE))
-    cells = min(cells, MAX_SAMPLES)
-    step = duration / cells
-    times = [start_sec + step * (i + 0.5) for i in range(cells)]
-    return times, step / 2.0
+    window = ((["-ss", f"{start:.3f}"] if start > 0 else [])
+              + (["-t", f"{duration:.3f}"] if duration is not None else []))
+    cmd = [ffmpeg_executable(), "-v", "error", "-nostdin", *window, "-i", str(video_path),
+           "-an", "-sn", "-vf", f"fps={1.0 / step:g}:round=near,scale={w}:{h}",
+           "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    size = w * h * 3
+    k = 0
+    try:
+        while True:
+            buf = proc.stdout.read(size)
+            if len(buf) < size:
+                break
+            yield start + k * step, np.frombuffer(buf, np.uint8).reshape(h, w, 3), src_h
+            k += 1
+    finally:
+        proc.stdout.close()
+        proc.kill()
+        proc.wait()
 
 
-def extract_frame_rgb(cap: cv2.VideoCapture, time_sec: float):
-    cap.set(cv2.CAP_PROP_POS_MSEC, max(0, time_sec * 1000))
-    ok, frame = cap.read()
-    if not ok or frame is None:
-        return None
-    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+_detector = None
+
+
+def yunet_detector():
+    """Per-process YuNet instance; downloads the 230 KB model on first use."""
+    global _detector
+    if _detector is None:
+        if not YUNET_MODEL.exists():
+            import urllib.request
+            YUNET_MODEL.parent.mkdir(parents=True, exist_ok=True)
+            print(f"Downloading YuNet face model -> {YUNET_MODEL}")
+            urllib.request.urlretrieve(YUNET_URL, YUNET_MODEL)
+        _detector = cv2.FaceDetectorYN.create(str(YUNET_MODEL), "", (320, 320),
+                                              score_threshold=YUNET_MIN_SCORE)
+    return _detector
+
+
+def detect_faces(frame_bgr) -> List[Tuple[float, float, float, float, float]]:
+    """YuNet detections as (score, x, y, w, h) in frame pixels, largest first."""
+    fh, fw = frame_bgr.shape[:2]
+    s = min(1.0, DETECT_WIDTH / fw)
+    small = cv2.resize(frame_bgr, (int(fw * s), int(fh * s))) if s < 1.0 else frame_bgr
+    det = yunet_detector()
+    det.setInputSize((small.shape[1], small.shape[0]))
+    _, raw = det.detect(small)
+    faces = [] if raw is None else [
+        (float(r[14]), float(r[0]) / s, float(r[1]) / s, float(r[2]) / s, float(r[3]) / s)
+        for r in raw
+    ]
+    faces.sort(key=lambda f: f[4], reverse=True)
+    return faces
+
+
+def _dlib_box(face, frame_shape) -> Tuple[int, int, int, int]:
+    """(top, right, bottom, left) for dlib from a YuNet box.
+
+    YuNet's box runs from the hairline; dlib's HOG box is roughly square, brow to
+    chin. Taking the bottom-anchored square of YuNet's width reproduces it closely
+    enough that encodings and face_yaw match a native HOG box (see YUNET_MODEL).
+    """
+    _, x, y, w, h = face
+    fh, fw = frame_shape[:2]
+    top = int(max(0, y + h - w))
+    bottom = int(min(fh - 1, y + h))
+    left = int(max(0, x))
+    right = int(min(fw - 1, x + w))
+    return top, right, bottom, left
+
+
+def is_on_set(face, frame_h: int) -> bool:
+    """A detection that counts as a person on screen. See FACE_SCORE_MIN."""
+    return face[0] >= FACE_SCORE_MIN and face[4] >= MIN_FACE_FRACTION * frame_h
+
+
+def analyze_frames(frames, target_encoding) -> List[dict]:
+    """Per-sample face record for the output of sample_frames.
+
+    Each record: t, src_h, frame_h, frame_w and `faces`, a list of
+    [score, x, y, w, h, dist, yaw] with the box as fractions of the frame, for every
+    plausible face (score >= YUNET_MIN_SCORE, >= 3% of frame height). yaw is
+    measured on every sample (None when landmarks cannot be fitted). dist is
+    measured on every IDENTITY_EVERY-th sample, and also whenever the largest face
+    jumped or the face count changed since the previous sample -- i.e. at the first
+    sample of a new track -- and is None otherwise.
+
+    The record is independent of the counting thresholds, so an audit can cache it
+    and re-apply solo_segments with different settings without decoding again.
+    """
+    records: List[dict] = []
+    prev = None
+    for i, (t, frame, src_h) in enumerate(frames):
+        fh, fw = frame.shape[:2]
+        faces = [f for f in detect_faces(frame) if f[4] >= 0.03 * fh]
+        jumped = prev is None or len(faces) != len(prev) or (
+            faces and _shift(prev[0], faces[0]) >= TRACK_MAX_SHIFT)
+        measure = i % IDENTITY_EVERY == 0 or jumped
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if faces else None
+        out = []
+        for f in faces:
+            box = _dlib_box(f, frame.shape)
+            yaw = face_yaw(rgb, box)
+            yaw = None if yaw is None else round(yaw, 4)
+            dist = None
+            if measure:
+                enc = face_recognition.face_encodings(rgb, known_face_locations=[box])
+                if enc:
+                    dist = round(float(face_recognition.face_distance(
+                        [target_encoding], enc[0])[0]), 4)
+            out.append([round(f[0], 3), round(f[1] / fw, 4), round(f[2] / fh, 4),
+                        round(f[3] / fw, 4), round(f[4] / fh, 4), dist, yaw])
+        records.append({"t": round(t, 3), "src_h": src_h, "frame_h": fh,
+                        "frame_w": fw, "faces": out})
+        prev = faces
+    return records
+
+
+# Parallel chunks for analyze_video. Each worker loads its own dlib models (~100 MB).
+ANALYSIS_WORKERS = max(1, min(12, (os.cpu_count() or 4) - 4))
+ANALYSIS_CHUNK_SEC = 300.0
+
+
+def _analyze_chunk(video_path: str, target_encoding, start: float,
+                   duration: float) -> List[dict]:
+    cv2.setNumThreads(1)
+    return analyze_frames(sample_frames(Path(video_path), start=start, duration=duration),
+                          target_encoding)
+
+
+def analyze_video(video_path: Path, target_encoding,
+                  workers: int = ANALYSIS_WORKERS) -> List[dict]:
+    """analyze_frames over a whole video, split into time chunks across processes.
+
+    Single-threaded the analysis runs at ~4x realtime, i.e. half an hour for a
+    two-hour bulletin; chunked over the CPU cores it keeps pace with Whisper.
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0
+    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+    cap.release()
+    total = frames / fps if fps else 0.0
+    if workers <= 1 or total <= ANALYSIS_CHUNK_SEC:
+        return analyze_frames(sample_frames(video_path), target_encoding)
+
+    from concurrent.futures import ProcessPoolExecutor
+    n = math.ceil(total / ANALYSIS_CHUNK_SEC)
+    step = round(ANALYSIS_CHUNK_SEC / SECONDS_PER_SAMPLE) * SECONDS_PER_SAMPLE
+    # The last chunk gets no -t, so a container whose frame count under-reports the
+    # duration still has its tail analysed.
+    jobs = [(i * step, step if i < n - 1 else None) for i in range(n)]
+    with ProcessPoolExecutor(min(workers, n)) as ex:
+        parts = list(ex.map(_analyze_chunk, [str(video_path)] * n,
+                            [target_encoding] * n, *zip(*jobs)))
+    return [r for part in parts for r in part]
+
+
+def _shift(a, b) -> float:
+    """Centre displacement between two (score, x, y, w, h) boxes, in face widths."""
+    ax, ay = a[1] + a[3] / 2, a[2] + a[4] / 2
+    bx, by = b[1] + b[3] / 2, b[2] + b[4] / 2
+    return math.hypot(ax - bx, ay - by) / max(1.0, min(a[3], b[3]))
 
 
 def face_yaw(frame_rgb, box) -> Optional[float]:
@@ -466,120 +672,96 @@ def face_yaw(frame_rgb, box) -> Optional[float]:
 
 
 def presenter_sized_faces(frame_rgb) -> List[Tuple[int, int, int, int]]:
-    """HOG detections large enough to be a person on set, not a face in wall art.
+    """Faces that count as a person on set, as dlib (top, right, bottom, left) boxes.
 
-    Detects on a DETECT_SCALE copy and returns boxes in FULL-resolution coordinates,
-    so callers can feed them straight to face_encodings/face_landmarks on the
-    original frame. See MIN_FACE_FRACTION for why the floor is tied to the scale.
+    Kept for the one-off maintenance scripts (audit_clip_pose, backfill_face_height);
+    the pipeline itself goes through analyze_frames/solo_segments.
     """
-    floor_px = frame_rgb.shape[0] * MIN_FACE_FRACTION
-    if DETECT_SCALE >= 1.0:
-        found = face_recognition.face_locations(frame_rgb, model="hog")
-    else:
-        small = cv2.resize(frame_rgb, (0, 0), fx=DETECT_SCALE, fy=DETECT_SCALE)
-        inv = 1.0 / DETECT_SCALE
-        found = [tuple(int(round(c * inv)) for c in box)
-                 for box in face_recognition.face_locations(small, model="hog")]
-    return [box for box in found if (box[2] - box[0]) >= floor_px]
+    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    return [_dlib_box(f, frame_rgb.shape) for f in detect_faces(frame_bgr)
+            if is_on_set(f, frame_rgb.shape[0])]
 
 
 def solo_segments(
-    cap: cv2.VideoCapture,
+    records: List[dict],
     start_sec: float,
     end_sec: float,
-    target_encoding,
-    sample_count: int,
     tolerance: float,
+    min_duration: float = MIN_CLIP_DURATION,
 ) -> List[Tuple[float, float, int]]:
-    """Sub-ranges of a scene in which only the target reporter appears.
+    """Sub-ranges of one scene in which only the target reporter is on screen.
 
-    This used to be a whole-scene yes/no vote that returned False the moment any
-    sample showed a second face. Combined with get_scene_list(start_in_scene=True) -
-    which makes a cut-free broadcast ONE scene covering the whole file - that meant
-    a single two-face insert discarded everything: measured on a 34.7-minute Deniz
-    Zeyrek monologue, samples 1-6 matched him at distance 0.33-0.45 and sample 7
-    caught a two-face graphic, so all 34.7 minutes were thrown away and the video
-    yielded zero clips. It is also why the long formats already in the corpus sit at
-    2-13% usable while the 7-minute Fatih Portakal videos reach 75%.
+    `records` are analyze_frames output; only those inside the scene, after
+    SCENE_EDGE_TRIM is taken off both ends, are considered. A sample passes when:
 
-    So each sample now certifies only its own cell of the scene. A cell whose sample
-    shows a second face, a different face, or no face at all is dropped, and
-    surviving neighbours are merged back into contiguous ranges. That monologue
-    loses the one 30-second cell instead of the whole broadcast.
+      1. exactly one detection is a person on set (is_on_set) -- a second face, a
+         split-screen guest, an interpreter box, or NO face all fail;
+      2. it belongs to a track (run of such samples whose face does not jump by
+         TRACK_MAX_SHIFT face-widths) whose median identity distance is within
+         `tolerance`; a track with no identity measurement at all fails;
+      3. its own yaw is <= MAX_FACE_YAW ("the presenter faces the camera
+         directly" -- a profile to an off-camera guest has no readable mouth); a
+         face whose landmarks cannot be fitted fails.
 
-    A cell passes only if its sample shows exactly one presenter-sized face (see
-    presenter_sized_faces, which ignores detections too small to be a person on
-    set), that face matches the reporter, and it is turned no further from the lens
-    than MAX_FACE_YAW. Everything else fails: zero faces carries no lip-reading
-    signal, and a frame that cannot be decoded or landmarked counts as bad too, so
-    a video OpenCV cannot seek yields nothing rather than unverified clips.
+    Passing samples are merged into runs; each run becomes (start, end, face_px),
+    extended by half a sample step either side and clamped to the trimmed scene,
+    and dropped when shorter than min_duration. face_px is the median on-set face
+    height in SOURCE pixels -- recorded, never gated on (see CLIP_FIELDS).
 
-    Verification is therefore only as fine as SECONDS_PER_SAMPLE: the sample sits at
-    its cell's centre, so up to half a cell either side of it is inferred, and an
-    insert shorter than a cell that straddles a boundary can leak a second or two
-    into a kept segment. Lower SECONDS_PER_SAMPLE to tighten that, at one extra HOG
-    detection (~1 s at 1080p) per cell added.
+    Why not a whole-scene vote: get_scene_list(start_in_scene=True) makes a cut-free
+    broadcast ONE scene, and one two-face insert then discarded 34.7 minutes of
+    clean Deniz Zeyrek monologue. Cutting at the failing samples keeps the rest.
     """
-    times, half = sample_grid(start_sec, end_sec, sample_count)
-    if not times:
+    lo, hi = start_sec + SCENE_EDGE_TRIM, end_sec - SCENE_EDGE_TRIM
+    recs = [r for r in records if lo <= r["t"] <= hi]
+    if hi - lo < min_duration or not recs:
         return []
 
-    good: List[bool] = []
-    heights: List[Optional[int]] = []
-    for t in times:
-        frame_rgb = extract_frame_rgb(cap, t)
-        if frame_rgb is None:
-            good.append(False); heights.append(None)
+    # 1. exactly one person on set
+    solo: List[Optional[list]] = []
+    for r in recs:
+        on_set = [f for f in r["faces"] if f[0] >= FACE_SCORE_MIN and f[4] >= MIN_FACE_FRACTION]
+        solo.append(on_set[0] if len(on_set) == 1 else None)
+
+    # 2. tracks, identity voted per track
+    def px(r, f):
+        return (f[0], f[1] * r["frame_w"], f[2] * r["frame_h"],
+                f[3] * r["frame_w"], f[4] * r["frame_h"])
+
+    good = [False] * len(recs)
+    i = 0
+    while i < len(recs):
+        if solo[i] is None:
+            i += 1
             continue
+        j = i
+        while (j + 1 < len(recs) and solo[j + 1] is not None
+               and _shift(px(recs[j], solo[j]), px(recs[j + 1], solo[j + 1])) < TRACK_MAX_SHIFT):
+            j += 1
+        track = range(i, j + 1)
+        dists = [solo[k][5] for k in track if solo[k][5] is not None]
+        if dists and statistics.median(dists) <= tolerance:
+            # 3. yaw, per sample
+            for k in track:
+                good[k] = solo[k][6] is not None and solo[k][6] <= MAX_FACE_YAW
+        i = j + 1
 
-        locations = presenter_sized_faces(frame_rgb)
-        if len(locations) != 1:
-            good.append(False); heights.append(None)
-            continue
-
-        encoding = face_recognition.face_encodings(
-            frame_rgb, known_face_locations=locations
-        )
-        if not encoding:
-            good.append(False); heights.append(None)
-            continue
-
-        if not face_recognition.compare_faces(
-            [target_encoding], encoding[0], tolerance=tolerance
-        )[0]:
-            good.append(False); heights.append(None)
-            continue
-
-        # Right person, one of them, facing the camera. A profile shot of the
-        # presenter talking to an off-camera guest passes every other test and is
-        # still unusable, so this is the last gate. See MAX_FACE_YAW.
-        yaw = face_yaw(frame_rgb, locations[0])
-        good.append(yaw is not None and yaw <= MAX_FACE_YAW)
-        # Recorded, not gated on: the 88x88 lip crop wants a face around 260 px and
-        # a hard floor there would delete whole reporters (kubra_par's 1079 clips sit
-        # at 137 px), so the number travels into the manifest and Phase 2/3 pick
-        # their own threshold. See CLIP_FIELDS' face_height_px.
-        heights.append(locations[0][2] - locations[0][0])
-
-    runs: List[Tuple[int, int]] = []
-    run_start_i: Optional[int] = None
-    for i, ok in enumerate(good):
-        if ok and run_start_i is None:
-            run_start_i = i
-        elif not ok and run_start_i is not None:
-            runs.append((run_start_i, i - 1))
-            run_start_i = None
-    if run_start_i is not None:
-        runs.append((run_start_i, len(good) - 1))
-
+    half = SECONDS_PER_SAMPLE / 2.0
     out: List[Tuple[float, float, int]] = []
-    for a, b in runs:
-        hs = [h for h in heights[a:b + 1] if h]
-        # Cells come from the scene bounds, but clamp anyway so a rounding error can
-        # never ask ffmpeg for a range outside the scene.
-        out.append((max(start_sec, times[a] - half),
-                    min(end_sec, times[b] + half),
-                    int(statistics.median(hs)) if hs else 0))
+    k = 0
+    while k < len(recs):
+        if not good[k]:
+            k += 1
+            continue
+        m = k
+        while m + 1 < len(recs) and good[m + 1]:
+            m += 1
+        a = max(lo, recs[k]["t"] - half)
+        b = min(hi, recs[m]["t"] + half)
+        if b - a >= min_duration:
+            hs = [solo[q][4] * recs[q]["src_h"] for q in range(k, m + 1)]
+            out.append((a, b, int(statistics.median(hs))))
+        k = m + 1
     return out
 
 
@@ -626,7 +808,6 @@ def process_video(
     output_dir: Path,
     target_encoding,
     threshold: float,
-    sample_count: int,
     tolerance: float,
     min_duration: float,
     scene_rows: List[dict],
@@ -634,56 +815,38 @@ def process_video(
     print(f"\nProcessing video: {video_path}")
     scenes = detect_scenes(video_path, threshold=threshold)
     print(f"Detected scenes: {len(scenes)}")
-
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
+    records = analyze_video(video_path, target_encoding)
 
     kept = 0
     skipped = 0
     base = safe_name(video_path.stem)
 
-    try:
-        for idx, (scene_start, scene_end) in enumerate(scenes, start=1):
-            if scene_end - scene_start < min_duration:
-                skipped += 1
-                continue
+    for idx, (scene_start, scene_end) in enumerate(scenes, start=1):
+        segments = solo_segments(records, scene_start, scene_end, tolerance,
+                                 min_duration=min_duration)
+        if not segments:
+            skipped += 1
+            continue
 
-            segments = solo_segments(
-                cap=cap,
-                start_sec=scene_start,
-                end_sec=scene_end,
-                target_encoding=target_encoding,
-                sample_count=sample_count,
-                tolerance=tolerance,
+        # One scene can yield several clips; start-end in the name keeps them
+        # distinct, so the scene index still means the source scene.
+        for start_sec, end_sec, face_h in segments:
+            duration = end_sec - start_sec
+            clip_name = f"{base}_scene_{idx:04d}_{start_sec:.2f}-{end_sec:.2f}.mp4"
+            output_video = output_dir / clip_name
+            export_clip(video_path, output_video, start_sec, end_sec)
+            scene_rows.append(
+                {
+                    "video": video_path.name,
+                    "scene_index": idx,
+                    "start_sec": round(start_sec, 3),
+                    "end_sec": round(end_sec, 3),
+                    "duration_sec": round(duration, 3),
+                    "face_height_px": face_h,
+                }
             )
-            if not segments:
-                skipped += 1
-                continue
-
-            # One scene can now yield several clips; start-end in the name keeps
-            # them distinct, so the scene index still means the source scene.
-            for start_sec, end_sec, face_h in segments:
-                duration = end_sec - start_sec
-                if duration < min_duration:
-                    continue
-                clip_name = f"{base}_scene_{idx:04d}_{start_sec:.2f}-{end_sec:.2f}.mp4"
-                output_video = output_dir / clip_name
-                export_clip(video_path, output_video, start_sec, end_sec)
-                scene_rows.append(
-                    {
-                        "video": video_path.name,
-                        "scene_index": idx,
-                        "start_sec": round(start_sec, 3),
-                        "end_sec": round(end_sec, 3),
-                        "duration_sec": round(duration, 3),
-                        "face_height_px": face_h,
-                    }
-                )
-                kept += 1
-                print(f"Kept: {output_video.name}")
-    finally:
-        cap.release()
+            kept += 1
+            print(f"Kept: {output_video.name}")
 
     print(f"Finished {video_path.name} | kept={kept} skipped={skipped}")
 
@@ -702,10 +865,8 @@ def parse_args():
     parser.add_argument("--downloads-dir", default="data/raw_videos")
     parser.add_argument("--output-dir", default="data/reporter_solo_clips")
     parser.add_argument("--scene-threshold", type=float, default=30.0)
-    # Floor only; SECONDS_PER_SAMPLE sets the density. See sample_grid.
-    parser.add_argument("--sample-count", type=int, default=1)
-    parser.add_argument("--face-tolerance", type=float, default=0.47)
-    parser.add_argument("--min-duration", type=float, default=1.2)
+    parser.add_argument("--face-tolerance", type=float, default=IDENTITY_TOLERANCE)
+    parser.add_argument("--min-duration", type=float, default=MIN_CLIP_DURATION)
     return parser.parse_args()
 
 
@@ -735,7 +896,6 @@ def main():
             output_dir=output_dir,
             target_encoding=target_encoding,
             threshold=args.scene_threshold,
-            sample_count=max(1, args.sample_count),
             tolerance=args.face_tolerance,
             min_duration=max(0.1, args.min_duration),
             scene_rows=scene_rows,

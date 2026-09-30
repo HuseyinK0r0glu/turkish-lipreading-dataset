@@ -11,6 +11,7 @@ Full run (processes every row):
     uv run python scripts/run_all.py
     uv run python scripts/run_all.py --whisper-model small
     uv run python scripts/run_all.py --limit 10        # first 10 rows after filtering
+    uv run python scripts/run_all.py --reporters cuneyt_ozdemir --max-hours 15
     uv run python scripts/run_all.py --exclude-reporters cuneyt_ozdemir
     uv run python scripts/run_all.py --reporters cem_ogretir can_okanar
     uv run python scripts/run_all.py --pipeline 2
@@ -108,6 +109,13 @@ def append_clip_rows(csv_path: Path, rows):
             w.writerow(r)
 
 
+def read_clip_rows(csv_path: Path):
+    if not csv_path.exists():
+        return []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
 def get_durations_batch(urls):
     """Fetch durations for many URLs in a single yt-dlp call. Returns {video_id: seconds}."""
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
@@ -164,7 +172,7 @@ def run_pipeline1(selected, all_rows, links_csv, data_root, video_dir, output_di
 
 
 def run_pipeline2(selected, all_rows, links_csv, model_name, clips_csv, downloads_dir,
-                  clips_root, transcripts_dir, delete_source=True):
+                  clips_root, transcripts_dir, delete_source=True, max_hours=None):
     pipe2 = [r for r in by_pipeline(selected, "2") if not is_completed(r)]
     if not pipe2:
         print("[pipeline2] no pending rows")
@@ -174,7 +182,19 @@ def run_pipeline2(selected, all_rows, links_csv, model_name, clips_csv, download
     enc_cache = {}
     done = failed = 0
     total = len(pipe2)
+    # --max-hours counts clip hours already in the manifest for the reporters this run
+    # covers, so a stopped-and-restarted run keeps its budget instead of starting over.
+    reporters = {col(r, "reporter") for r in pipe2}
+    have_h = sum(float(c["duration_sec"]) for c in read_clip_rows(clips_csv)
+                 if c["reporter"] in reporters) / 3600
+    if max_hours is not None:
+        print(f"[pipeline2] {have_h:.2f} h of clips already in the manifest for "
+              f"{', '.join(sorted(reporters))}; stopping at {max_hours:g} h")
     for i, r in enumerate(pipe2, start=1):
+        if max_hours is not None and have_h >= max_hours:
+            print(f"[pipeline2] reached {have_h:.2f} h >= --max-hours {max_hours:g}; "
+                  f"stopping with {total - i + 1} rows still pending")
+            break
         reporter, url = col(r, "reporter"), col(r, "url")
         if not reporter or not url:
             continue
@@ -191,6 +211,7 @@ def run_pipeline2(selected, all_rows, links_csv, model_name, clips_csv, download
                                                delete_source=delete_source)
             transcribe_clips_into(clip_rows, transcripts_dir, model_name)
             append_clip_rows(clips_csv, clip_rows)
+            have_h += sum(c["duration_sec"] for c in clip_rows) / 3600
             # persist after each video -> safe to interrupt/resume
             mark_completed(all_rows, r, links_csv)
             done += 1
@@ -228,6 +249,7 @@ def select_rows(all_rows, pipelines=None, reporters=None, exclude_reporters=None
 
 
 def run_full(model_name, links_csv=VIDEO_LINKS, data_root=DATA, limit=None,
+             max_hours=None,
              delete_source=True, pipelines=None, reporters=None,
              exclude_reporters=None):
     all_rows = read_rows(links_csv)
@@ -244,7 +266,7 @@ def run_full(model_name, links_csv=VIDEO_LINKS, data_root=DATA, limit=None,
                   downloads_dir=data_root / "pipeline2_raw",
                   clips_root=data_root,
                   transcripts_dir=data_root / "reporter_transcripts",
-                  delete_source=delete_source)
+                  delete_source=delete_source, max_hours=max_hours)
 
 
 # ---------- quick test ----------
@@ -337,6 +359,9 @@ def main():
                     help="skip these reporter slugs, e.g. --exclude-reporters cuneyt_ozdemir")
     ap.add_argument("--pipeline", nargs="*", choices=["1", "2"],
                     help="only rows of these pipelines")
+    ap.add_argument("--max-hours", type=float,
+                    help="stop pipeline 2 once the selected reporters have this many "
+                         "hours of clips in reporter_clips.csv (existing clips count)")
     ap.add_argument("--limit", type=int,
                     help="process only the first N rows left after the other filters")
     ap.add_argument("--keep-source", action="store_true",
@@ -347,7 +372,7 @@ def main():
     if args.test:
         run_test(args.whisper_model, only=set(args.reporters) if args.reporters else None)
     else:
-        run_full(args.whisper_model, limit=args.limit,
+        run_full(args.whisper_model, limit=args.limit, max_hours=args.max_hours,
                  delete_source=not args.keep_source,
                  pipelines=set(args.pipeline) if args.pipeline else None,
                  reporters=set(args.reporters) if args.reporters else None,

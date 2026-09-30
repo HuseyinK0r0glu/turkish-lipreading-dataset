@@ -14,10 +14,11 @@ import json
 import sys
 from pathlib import Path
 
-import cv2
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from presenter_filter import (  # noqa: E402
+    IDENTITY_TOLERANCE,
+    MIN_CLIP_DURATION,
+    analyze_video,
     detect_scenes,
     download_video,
     export_clip,
@@ -71,7 +72,7 @@ def remove_source_video(video_path: Path) -> None:
 
 
 def select_clips(url, reporter, ref_encoding, downloads_dir: Path, clips_dir: Path,
-                 scene_threshold=30.0, sample_count=1, tolerance=0.5, min_duration=1.2,
+                 scene_threshold=30.0, tolerance=IDENTITY_TOLERANCE, min_duration=MIN_CLIP_DURATION,
                  delete_source=True):
     """Download the video and export clips where only the reporter appears.
 
@@ -81,45 +82,36 @@ def select_clips(url, reporter, ref_encoding, downloads_dir: Path, clips_dir: Pa
     """
     video_path = download_video(url, downloads_dir)
     scenes = detect_scenes(video_path, threshold=scene_threshold)
-
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
+    # One sequential pass over the whole video; every scene reads its own samples.
+    records = analyze_video(video_path, ref_encoding)
 
     base = safe_name(video_path.stem)
     clips_dir.mkdir(parents=True, exist_ok=True)
     rows = []
-    try:
-        for idx, (scene_start, scene_end) in enumerate(scenes, start=1):
-            if scene_end - scene_start < min_duration:
-                continue
-            # A scene can yield several clips: solo_segments cuts it at the samples
-            # where someone else (or nobody) is on screen instead of discarding the
-            # whole scene, which is what a cut-free broadcast needs.
-            for start_sec, end_sec, face_h in solo_segments(cap, scene_start,
-                                                            scene_end, ref_encoding,
-                                                            sample_count, tolerance):
-                if end_sec - start_sec < min_duration:
-                    continue
-                clip = clips_dir / f"{reporter}_{base}_scene_{idx:04d}_{start_sec:.2f}-{end_sec:.2f}.mp4"
-                export_clip(video_path, clip, start_sec, end_sec)
-                rows.append({
-                    "reporter": reporter,
-                    "source_url": url,
-                    "source_video": video_path.name,
-                    # as_posix(): the manifest is the Phase 2 hand-off and is often
-                    # written on Windows but read on Colab/Linux, where a backslash
-                    # path is not a path separator at all.
-                    "clip_file": clip.relative_to(PROJECT).as_posix(),
-                    "start_sec": round(start_sec, 3),
-                    "end_sec": round(end_sec, 3),
-                    "duration_sec": round(end_sec - start_sec, 3),
-                    # Median presenter face height over the cells this clip spans.
-                    # Not gated on -- see presenter_filter.solo_segments.
-                    "face_height_px": face_h,
-                })
-    finally:
-        cap.release()
+    for idx, (scene_start, scene_end) in enumerate(scenes, start=1):
+        # A scene can yield several clips: solo_segments cuts it at the samples
+        # where someone else (or nobody) is on screen instead of discarding the
+        # whole scene, which is what a cut-free broadcast needs.
+        for start_sec, end_sec, face_h in solo_segments(records, scene_start,
+                                                        scene_end, tolerance,
+                                                        min_duration):
+            clip = clips_dir / f"{reporter}_{base}_scene_{idx:04d}_{start_sec:.2f}-{end_sec:.2f}.mp4"
+            export_clip(video_path, clip, start_sec, end_sec)
+            rows.append({
+                "reporter": reporter,
+                "source_url": url,
+                "source_video": video_path.name,
+                # as_posix(): the manifest is the Phase 2 hand-off and is often
+                # written on Windows but read on Colab/Linux, where a backslash
+                # path is not a path separator at all.
+                "clip_file": clip.relative_to(PROJECT).as_posix(),
+                "start_sec": round(start_sec, 3),
+                "end_sec": round(end_sec, 3),
+                "duration_sec": round(end_sec - start_sec, 3),
+                # Median presenter face height over the samples this clip spans.
+                # Not gated on -- see presenter_filter.solo_segments.
+                "face_height_px": face_h,
+            })
 
     if delete_source:
         remove_source_video(video_path)
