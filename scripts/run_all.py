@@ -12,6 +12,7 @@ Full run (processes every row):
     uv run python scripts/run_all.py --whisper-model small
     uv run python scripts/run_all.py --limit 10        # first 10 rows after filtering
     uv run python scripts/run_all.py --reporters cuneyt_ozdemir --max-hours 15
+    uv run python scripts/run_all.py --channels CNN_TURK_5N1K --max-hours 15
     uv run python scripts/run_all.py --exclude-reporters cuneyt_ozdemir
     uv run python scripts/run_all.py --reporters cem_ogretir can_okanar
     uv run python scripts/run_all.py --pipeline 2
@@ -32,9 +33,11 @@ venv active (or venv/bin on PATH) when pipeline-1 rows are involved.
 import argparse
 import csv
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -147,6 +150,32 @@ def transcribe_clips_into(rows, transcripts_dir: Path, model_name):
 
 # ---------- full run ----------
 
+def network_up(host="www.youtube.com"):
+    try:
+        socket.getaddrinfo(host, 443)
+        return True
+    except OSError:
+        return False
+
+
+def wait_for_network(poll_sec=60):
+    """Block until YouTube resolves again. Returns True if it had to wait.
+
+    A dropped connection makes yt-dlp fail every row in seconds -- and report it as
+    "Requested format is not available", not as a network error -- so without this
+    one outage marked 4352 cuneyt_ozdemir rows FAILED in a row and ended the run.
+    """
+    if network_up():
+        return False
+    print(f"[pipeline2] network down (cannot resolve www.youtube.com); "
+          f"waiting, checking every {poll_sec}s ...", flush=True)
+    t0 = time.time()
+    while not network_up():
+        time.sleep(poll_sec)
+    print(f"[pipeline2] network back after {(time.time() - t0) / 60:.0f} min", flush=True)
+    return True
+
+
 def run_pipeline1(selected, all_rows, links_csv, data_root, video_dir, output_dir,
                   model_name):
     pipe1 = [r for r in by_pipeline(selected, "1") if not is_completed(r)]
@@ -202,6 +231,7 @@ def run_pipeline2(selected, all_rows, links_csv, model_name, clips_csv, download
         if not img.exists():
             print(f"[pipeline2] skip {reporter}: missing image {img}")
             continue
+        wait_for_network()
         try:
             if reporter not in enc_cache:
                 enc_cache[reporter] = load_reference_encoding(img)
@@ -220,6 +250,12 @@ def run_pipeline2(selected, all_rows, links_csv, model_name, clips_csv, download
         except KeyboardInterrupt:
             raise
         except Exception as exc:
+            # The connection dropped mid-row: that is not this video's fault, so wait
+            # it out and give the row one more go instead of recording a failure.
+            if wait_for_network():
+                pipe2.insert(i, r)
+                total += 1
+                continue
             # A single unavailable/geo-blocked/deleted video must not abort a
             # 4000-row run. The row stays pending so a later run retries it.
             failed += 1
@@ -229,7 +265,7 @@ def run_pipeline2(selected, all_rows, links_csv, model_name, clips_csv, download
 
 
 def select_rows(all_rows, pipelines=None, reporters=None, exclude_reporters=None,
-                limit=None):
+                limit=None, channels=None):
     """Filter first, then take the first `limit` of what survives.
 
     Same order as colab_run_all.ipynb, and it matters: cuneyt_ozdemir occupies CSV rows
@@ -245,15 +281,18 @@ def select_rows(all_rows, pipelines=None, reporters=None, exclude_reporters=None
     if exclude_reporters:
         rows = [r for r in rows
                 if col(r, "pipeline") != "2" or col(r, "reporter") not in exclude_reporters]
+    if channels:
+        rows = [r for r in rows if col(r, "channel") in channels]
     return rows[:limit] if limit else rows
 
 
 def run_full(model_name, links_csv=VIDEO_LINKS, data_root=DATA, limit=None,
              max_hours=None,
              delete_source=True, pipelines=None, reporters=None,
-             exclude_reporters=None):
+             exclude_reporters=None, channels=None):
     all_rows = read_rows(links_csv)
-    selected = select_rows(all_rows, pipelines, reporters, exclude_reporters, limit)
+    selected = select_rows(all_rows, pipelines, reporters, exclude_reporters, limit,
+                           channels)
     if len(selected) != len(all_rows):
         pending = sum(1 for r in selected if not is_completed(r))
         print(f"[run_all] {len(selected)} of {len(all_rows)} CSV rows selected "
@@ -359,6 +398,9 @@ def main():
                     help="skip these reporter slugs, e.g. --exclude-reporters cuneyt_ozdemir")
     ap.add_argument("--pipeline", nargs="*", choices=["1", "2"],
                     help="only rows of these pipelines")
+    ap.add_argument("--channels", nargs="*",
+                    help="only rows whose `channel` column is one of these, e.g. "
+                         "--channels CNN_TURK_5N1K")
     ap.add_argument("--max-hours", type=float,
                     help="stop pipeline 2 once the selected reporters have this many "
                          "hours of clips in reporter_clips.csv (existing clips count)")
@@ -377,7 +419,8 @@ def main():
                  pipelines=set(args.pipeline) if args.pipeline else None,
                  reporters=set(args.reporters) if args.reporters else None,
                  exclude_reporters=(set(args.exclude_reporters)
-                                    if args.exclude_reporters else None))
+                                    if args.exclude_reporters else None),
+                 channels=set(args.channels) if args.channels else None)
 
 
 if __name__ == "__main__":

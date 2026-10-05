@@ -37,7 +37,16 @@ if sys.version_info >= (3, 13):
 # available"; run_all.run_pipeline2 catches that, logs it, and leaves the row pending
 # rather than aborting the run. Append "/bestvideo+bestaudio/best" to accept lower
 # resolutions instead.
-DOWNLOAD_FORMAT = "bestvideo[height>=720]+bestaudio/best[height>=720]"
+#
+# Capped at 1080p when the video has it. Nothing downstream uses more: analysis is
+# scaled to ANALYSIS_MAX_HEIGHT and the lip crop is 88x88. YouTube serves this
+# machine at ~300-400 KB/s per video whatever the line speed, and a 4K stream is ~4x
+# the bytes (a 10-minute cuneyt_ozdemir video: 619 MB at 2160p, 153 MB at 1080p), so
+# uncapped "best" spent most of the run downloading pixels that were thrown away.
+# Sources that only exist above 1080p still download, via the uncapped fallback.
+DOWNLOAD_FORMAT = ("bestvideo[height>=720][height<=1080]+bestaudio"
+                   "/best[height>=720][height<=1080]"
+                   "/bestvideo[height>=720]+bestaudio/best[height>=720]")
 
 # Every verdict is taken on sampled frames read in a single sequential ffmpeg pass
 # (see sample_frames). This used to be one frame per 30 s, each certifying 15 s

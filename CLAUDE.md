@@ -191,6 +191,8 @@ speaker (Cüneyt Özdemir), which strains speaker-independent splits.
    against a painting, the rows complete with zero clips, and nothing looks broken.
 5. **`DOWNLOAD_FORMAT` requires >=720p**, deliberately. Sub-720p sources are skipped
    (row left pending), not downscaled into the dataset.
+   It is also capped at 1080p when the video has it: YouTube serves ~300-400 KB/s per
+   video here, and 4K is ~4x the bytes for pixels the 1080p analysis throws away.
 6. **`run_pipeline2` catches per-row exceptions.** One unavailable video must never abort
    a 4691-row run.
 7. **Only successfully downloaded pipeline-1 rows are marked completed** —
