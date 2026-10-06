@@ -683,7 +683,7 @@ def face_yaw(frame_rgb, box) -> Optional[float]:
 def presenter_sized_faces(frame_rgb) -> List[Tuple[int, int, int, int]]:
     """Faces that count as a person on set, as dlib (top, right, bottom, left) boxes.
 
-    Kept for the one-off maintenance scripts (audit_clip_pose, backfill_face_height);
+    Kept for the one-off maintenance script backfill_face_height;
     the pipeline itself goes through analyze_frames/solo_segments.
     """
     frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)

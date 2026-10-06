@@ -24,7 +24,6 @@ turkish-lipreading-dataset/
 │   ├── test_data_pipe.py        ← isolated smoke test over the first N CSV rows
 │   ├── download_videos.py       ← pipeline 1 downloader
 │   ├── run_whisper.py           ← Whisper ASR + NFC/strip normalization
-│   ├── download_and_transcribe.py  ← older pipeline-1-only entry point
 │   ├── pipeline2.py             ← pipeline 2 orchestration + per-clip Whisper
 │   ├── presenter_filter.py      ← pipeline 2 ENGINE (download, scene detect, face filter)
 │   ├── merge_links.py           ← idempotent append into video_links.csv, keeps `completed`
@@ -32,7 +31,6 @@ turkish-lipreading-dataset/
 │   ├── reset_empty_rows.py      ← un-complete rows that yielded zero clips, so they retry
 │   ├── defer_low_res.py         ← probe pending rows, move sub-720p ones to the end
 │   ├── audit_clips.py           ← re-apply the CURRENT solo rules to produced clips
-│   ├── audit_clip_pose.py       ← older yaw-only audit (superseded by audit_clips.py)
 │   └── backfill_face_height.py  ← fill face_height_px on pre-existing manifest rows
 └── data/                        ← ALL generated; gitignored. Nothing is placed here by hand.
 ```

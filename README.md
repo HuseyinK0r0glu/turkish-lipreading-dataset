@@ -28,7 +28,6 @@ turkish-lipreading-dataset/
     ├── pipeline2.py                   ← solo-presenter scene filter + clip export
     ├── presenter_filter.py            ← shared building blocks (download, scene detect, face filter)
     ├── download_videos.py             ← pipeline 1 downloader
-    ├── download_and_transcribe.py     ← pipeline 1 entry point (download + Whisper)
     ├── run_whisper.py                 ← Whisper ASR wrapper
     └── test_data_pipe.py              ← smoke test over the first N CSV rows (isolated)
 ```
