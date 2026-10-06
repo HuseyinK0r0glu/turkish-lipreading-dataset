@@ -26,7 +26,8 @@ Each clip is a sequence of **88×88 grayscale mouth crops** (LRW convention), pr
 1. Face landmarks (MediaPipe Face Landmarker, 468/478 landmarks).
 2. Face tracking; drop frames/segments on tracking failure (§4.3).
 3. Lip-region crop from the ~20 mouth landmarks → 88×88 grayscale.
-4. Audio-visual sync check (SyncNet); discard clips with score < 3.
+4. Audio-visual sync check (SyncNet): discard clips with score < 3, **and** drop
+   individual words/sentences whose local sync confidence is low (off-screen speech, §4.5).
 
 ---
 
@@ -211,6 +212,8 @@ only needed transiently for SyncNet (which wants A/V together) — see §4.5.
 | `confidence` | transcript | Whisper word prob |
 | `manual_review` | transcript | 1 if confidence < 0.7 |
 | `syncnet_score`, `syncnet_offset` | SyncNet | for the parent source clip |
+| `word_sync_conf` | SyncNet | mean framewise sync confidence over this word's window (§4.5) — the off-screen-speech signal |
+| `lip_motion` | face landmarks | std of inner-lip aperture over the word window, normalized by mouth width; ~0 = closed/still mouth |
 | `mean_yaw`, `mean_pitch` | face landmarks | pose stats (precompute for Phase 5 error analysis) |
 | `track_ok` | tracker | no tracking gap inside the word span |
 
@@ -299,13 +302,49 @@ repeat work at ~200 ms a face. Instead:
 - Keep the threshold a config parameter — Phase 4 Stage C ablations study the sync
   threshold, and `syncnet_score` is stored per clip so re-thresholding needs no recompute.
 
+#### 4.5.1 Off-screen speech — why a per-clip score is not enough
+Phase 1's filter is purely visual. A clip where the presenter is alone, frontal and
+correctly identified **but silent** while someone off camera talks (a guest, a voice-over,
+a field reporter's package audio) passes every Phase 1 gate, and Whisper transcribes the
+off-screen voice cleanly — Whisper `confidence` is high because the audio is good. The
+result is words labelled onto a closed or nodding mouth: mislabelled training data.
+
+A single clip-level SyncNet score does not catch this when the off-screen part is only a
+stretch of the clip: 14 s of the presenter speaking + 6 s of someone else can still
+average above 3, and the 6 s of words go into the dataset.
+
+**Fix — score sync locally, per word:**
+- `syncnet_python` already computes a **framewise** confidence (`fconf`, smoothed
+  `fconfm`) on its way to the clip score. Keep that array (per source clip, e.g. in the
+  clip's `face_track_report` entry or a sidecar `.npy`), computed at the clip-level best
+  offset.
+- For each word, `word_sync_conf` = mean framewise confidence over the word's ±15-frame
+  window. Below `WORD_SYNC_MIN` → drop the word, log `reason = offscreen_speech` to
+  `discarded.csv`.
+- For each sentence, drop it (or split at the boundary) when more than a set fraction of
+  its words fail — same reason code.
+- **Second, independent signal (free):** `lip_motion` from the landmarks already
+  extracted in §4.4. A word spoken while the inner-lip aperture barely changes is
+  almost certainly not this person speaking. Use it to confirm SyncNet's verdict and to
+  catch windows where SyncNet's confidence is unreliable (very short words, edges).
+- Overlapping speech (presenter saying "evet" over a guest) will still leak occasionally;
+  that is accepted — LRS2/LRS3 are cleaned the same way.
+
+**Calibration, not manual cleaning:** hand-label a small set (~50-100 words where the
+speaker is off screen, plus a matched clean set — `discarded.csv` candidates and
+clips with low `syncnet_score` are good places to find them), plot both distributions of
+`word_sync_conf` and `lip_motion`, and choose `WORD_SYNC_MIN` (and an optional
+`LIP_MOTION_MIN`) from that. Everything after that is automatic; thresholds stay config
+parameters and both values are stored per word so they can be re-chosen without recompute.
+
 ### 4.6 Word-level clip generation
 For each word in the (clip-local) transcript:
 - `clip_start = word_start_sec − 15 frames`, `clip_end = word_end_sec + 15 frames`
   (clamped to clip bounds) → ~0.6–1.2 s, consistent with LRW's 29-frame standard while
   allowing LRW-1000-style variance. Phase 1's 2.0 s minimum clip length exists for this.
 - Slice the already-extracted 88×88 frame stack → `(T,88,88)` → write `.npz`.
-- Skip words whose frames overlap a tracking gap.
+- Skip words whose frames overlap a tracking gap, and words below `WORD_SYNC_MIN`
+  (off-screen speech, §4.5.1).
 - Carry `confidence`/`manual_review` into the manifest (do **not** drop low-confidence
   words automatically — flag them; Phase 3 decides).
 
@@ -314,7 +353,7 @@ For each word in the (clip-local) transcript:
 - For `duration > 8 s`, **split at natural pause boundaries** — use the inter-word gaps
   already present in `words[]` (largest silence gap nearest the midpoint, recurse until all
   pieces ≤ 8 s). Record `split_index`.
-- Drop segments `< 1 s`.
+- Drop segments `< 1 s`, and segments failing the off-screen-speech rule (§4.5.1).
 - Label each sentence clip with its full `text` and the embedded `word_spans`.
 
 ---
@@ -365,6 +404,9 @@ weights.
   frames-per-clip, SyncNet scores, `mouth_width_px`, discard reasons.
 - **Alignment audit:** for a sample, overlay the word text on the middle frame and verify the
   mouth is mid-articulation (catches fps/timestamp drift early).
+- **Off-screen speech audit:** a random sample of kept words with the lowest
+  `word_sync_conf` / `lip_motion` that still passed, reviewed with audio — confirms the
+  §4.5.1 thresholds are not leaking.
 - **Coverage report:** hours and word clips retained vs discarded per speaker/channel —
   feeds Phase 3's 500-class, 150k-clip targets.
 - Everything logged to `data/phase2/*.csv` so QC is reproducible.
@@ -397,6 +439,8 @@ weights.
 7. **Identity re-verification:** **off by default** (Phase 1 already does it), flag to
    enable at gap boundaries.
 8. **Face/mouth size:** **record, don't gate** (`face_height_px`, `mouth_width_px`).
+9. **Off-screen speech:** **per-word framewise SyncNet confidence + `lip_motion`**, thresholds
+   (`WORD_SYNC_MIN`, `LIP_MOTION_MIN`) chosen on a small hand-labelled calibration set (§4.5.1).
 
 ---
 
