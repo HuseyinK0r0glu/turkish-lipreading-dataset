@@ -72,14 +72,14 @@ Download the named time range (or the whole video when `start`/`end` are empty) 
 Whisper large-v3 → word-level JSON. **No face filtering, no speaker identity.**
 Overlapping intervals on the same URL are detected and skipped.
 
-### Pipeline 2 — solo-presenter clips (4691 rows)
+### Pipeline 2 — solo-presenter clips (7109 rows)
 
 Download the full broadcast → PySceneDetect scene cuts → sample every 0.2 s and keep
 only the stretches where **exactly one person** is on screen, it matches
 `pipeline2_reporter_pictures/<reporter>.jpeg` and faces the camera (invariant #3)
 → export each kept stretch (>= 2 s) as its own mp4 → Whisper per clip → append to
 `data/reporter_clips.csv`. **The source video is deleted immediately after clip export**
-so disk usage stays flat across a 4691-row run.
+so disk usage stays flat across a 7000-row run.
 
 Pipeline 2 is the one that matters: its clips are already single-speaker, face-verified
 and carry a `reporter` label (= `speaker_id`), which is what Phases 2/3 need. Pipeline 1
@@ -138,13 +138,13 @@ Transcript JSON schema (read-only contract for Phase 2):
 
 | Phase | Status |
 |-------|--------|
-| 1 — Download + Whisper ASR | Both pipelines verified end-to-end by `test_data_pipe.py`. Full run not yet done (`completed` empty on all 4699 rows). |
+| 1 — Download + Whisper ASR | Running. 1422 of 7117 rows completed (all 8 pipeline-1, 1414 of 7109 pipeline-2); `reporter_clips.csv` holds 61,346 clips / 168.9 h from 23 reporters (2026-10-06). |
 | 2 — Lip extraction + SyncNet | Designed in `plans/PHASE2_PLAN.md`, no code |
 | 3 — Dataset splits + benchmark | Not started |
 | 4–5 — Models + release | Not started |
 
 Known gaps: `lemma == surface_form` (zeyrek pending); `channel` is not propagated into
-`reporter_clips.csv` (see PHASE2_PLAN §1.2); 4407 of 4691 pipeline-2 rows are a single
+`reporter_clips.csv` (see PHASE2_PLAN §1.2); 4622 of 7109 pipeline-2 rows are a single
 speaker (Cüneyt Özdemir), which strains speaker-independent splits.
 
 ---
@@ -192,7 +192,7 @@ speaker (Cüneyt Özdemir), which strains speaker-independent splits.
    It is also capped at 1080p when the video has it: YouTube serves ~300-400 KB/s per
    video here, and 4K is ~4x the bytes for pixels the 1080p analysis throws away.
 6. **`run_pipeline2` catches per-row exceptions.** One unavailable video must never abort
-   a 4691-row run.
+   a 7000-row run.
 7. **Only successfully downloaded pipeline-1 rows are marked completed** —
    `download_videos()` returns the set of keys that need no further work.
 8. **`normalize_text` strips.** Whisper word tokens carry a leading space; without the
@@ -226,11 +226,14 @@ speaker (Cüneyt Özdemir), which strains speaker-independent splits.
 ## Runtime reality (measured, RTX A4000 + CUDA 12.2)
 
 Whisper large-v3 runs at **2.63x realtime on GPU**, ~0.4x on CPU. A 35-video sample of
-`video_links.csv` averages 20.5 min, so the whole CSV is ~1600 h of audio:
-**~5-6 weeks serial for everything, ~2.5 days excluding `cuneyt_ozdemir`.**
+`video_links.csv` averages 20.5 min a video. At that rate the 5695 pending pipeline-2 rows
+(2026-10-06) are ~1950 h of broadcast: **~4-5 weeks serial for everything, ~1 week
+excluding `cuneyt_ozdemir`** (1291 rows). Upper bounds: pipeline 2 only transcribes the
+kept clips, not the whole broadcast.
 
-`cuneyt_ozdemir` occupies CSV rows 235-4641 and is 94% of the corpus, so an unfiltered
-run reaches `cem_ogretir`/`can_okanar` only at the very end. Use the row filters:
+`cuneyt_ozdemir` is 4622 of 7117 rows (65%); 4404 of his are still pending and sit
+mostly in the back half of the CSV (rows 2466-7118, after `reorder_links.py`). Use the
+row filters to control what runs:
 
 ```powershell
 uv run python scripts/run_all.py --exclude-reporters cuneyt_ozdemir
