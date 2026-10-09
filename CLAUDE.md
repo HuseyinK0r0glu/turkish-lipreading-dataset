@@ -138,7 +138,7 @@ Transcript JSON schema (read-only contract for Phase 2):
 
 | Phase | Status |
 |-------|--------|
-| 1 — Download + Whisper ASR | Running. 1422 of 7117 rows completed (all 8 pipeline-1, 1414 of 7109 pipeline-2); `reporter_clips.csv` holds 61,346 clips / 168.9 h from 23 reporters (2026-10-06). |
+| 1 — Download + Whisper ASR | Paused at the 180 h mark. 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
 | 2 — Lip extraction + SyncNet | Designed in `plans/PHASE2_PLAN.md`, no code |
 | 3 — Dataset splits + benchmark | Not started |
 | 4–5 — Models + release | Not started |
@@ -226,9 +226,9 @@ speaker (Cüneyt Özdemir), which strains speaker-independent splits.
 ## Runtime reality (measured, RTX A4000 + CUDA 12.2)
 
 Whisper large-v3 runs at **2.63x realtime on GPU**, ~0.4x on CPU. A 35-video sample of
-`video_links.csv` averages 20.5 min a video. At that rate the 5695 pending pipeline-2 rows
-(2026-10-06) are ~1950 h of broadcast: **~4-5 weeks serial for everything, ~1 week
-excluding `cuneyt_ozdemir`** (1291 rows). Upper bounds: pipeline 2 only transcribes the
+`video_links.csv` averages 20.5 min a video. At that rate the 5606 pending pipeline-2 rows
+(2026-10-09) are ~1915 h of broadcast: **~4-5 weeks serial for everything, ~1 week
+excluding `cuneyt_ozdemir`** (1202 rows). Upper bounds: pipeline 2 only transcribes the
 kept clips, not the whole broadcast.
 
 `cuneyt_ozdemir` is 4622 of 7117 rows (65%); 4404 of his are still pending and sit

@@ -14,6 +14,10 @@ kaynak liste olarak duruyor; merge idempotent olduğu için tekrar çalıştırm
 
 ## 0. ÖNEMLİ — çalışan run bu dosyayı geri alabilir
 
+> **Çözüldü (2026-10-09):** merge tamamlandı, satırlar `video_links.csv`'de duruyor
+> (artık 7117 satır, 1511 `completed=1`). Aşağıdaki uyarı sadece *ileride* bir run
+> açıkken yeniden merge yapılırsa geçerli.
+
 `run_all.mark_completed`, her tamamlanan satırda `video_links.csv`'yi **başlangıçta
 okuduğu listeden baştan yazıyor** (`run_all.py:83`). Yani bir run açıkken merge
 yapılırsa, o run'ın bir sonraki tamamlanan satırında yeni satırlar sessizce

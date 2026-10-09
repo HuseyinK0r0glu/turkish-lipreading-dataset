@@ -5,8 +5,8 @@ This document is a design/implementation plan — **no code yet**. It is written
 with the Phase 1 artifacts already in this repo and to feed cleanly into Phase 3
 (Dataset Compilation & Benchmark Design).
 
-**Input available today** (`data/reporter_clips.csv`, measured 2026-10-06): 61,346 solo
-clips, 168.9 h, 23 reporters, `face_height_px` filled on every row. That is already past
+**Input available today** (`data/reporter_clips.csv`, measured 2026-10-09): 67,563 solo
+clips, 180.0 h, 24 reporters, `face_height_px` filled on every row. That is already past
 the 100 h raw-video target, so Phase 2 can start on the existing manifest while the
 Phase 1 run continues to append to it.
 
@@ -415,7 +415,7 @@ weights.
 
 ## 8. Scale, performance, storage
 
-- **Input size:** ~169 h of clips today (§ top) → on the order of 15M frames at 25 fps.
+- **Input size:** ~180 h of clips today (§ top) → on the order of 16M frames at 25 fps.
   Face landmarks are the per-frame hot loop; budget a pilot on one reporter to measure
   frames/s before the full run.
 - **Storage estimate:** 150k word clips × ~25 frames × 88×88 bytes ≈ ~29 GB raw before

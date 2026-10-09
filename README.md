@@ -18,18 +18,28 @@ A dataset pipeline for building the first Turkish visual word-spotting lip-readi
 ```
 turkish-lipreading-dataset/
 ├── video_links.csv                    ← THE input for both pipelines (url, channel, start, end, pipeline, reporter, completed)
+├── cookies.txt                        ← optional, gitignored; YouTube session for age-restricted videos
 ├── pipeline2_reporter_pictures/       ← reference face photos, one <slug>.jpeg per reporter
+├── models/                            ← YuNet face detector (auto-downloaded if missing)
+├── plans/PHASE2_PLAN.md               ← Phase 2 design (lip extraction + SyncNet)
 ├── pyproject.toml                     ← uv-managed dependencies
 ├── .python-version                    ← 3.12
 ├── uv.lock                            ← committed lockfile
 ├── colab_run_all.ipynb                ← Colab GPU runner (both pipelines)
 └── scripts/
     ├── run_all.py                     ← unified local runner (pipeline 1 + 2)
-    ├── pipeline2.py                   ← solo-presenter scene filter + clip export
+    ├── run_status.py                  ← read-only progress/ETA snapshot of a live run
+    ├── pipeline2.py                   ← pipeline 2 orchestration + per-clip Whisper
     ├── presenter_filter.py            ← shared building blocks (download, scene detect, face filter)
     ├── download_videos.py             ← pipeline 1 downloader
     ├── run_whisper.py                 ← Whisper ASR wrapper
-    └── test_data_pipe.py              ← smoke test over the first N CSV rows (isolated)
+    ├── test_data_pipe.py              ← smoke test over the first N CSV rows (isolated)
+    ├── merge_links.py                 ← idempotent append into video_links.csv, keeps `completed`
+    ├── reorder_links.py               ← push a reporter's pending rows to the end of the queue
+    ├── reset_empty_rows.py            ← un-complete rows that yielded zero clips, so they retry
+    ├── defer_low_res.py               ← probe pending rows, move sub-720p ones to the end
+    ├── audit_clips.py                 ← re-apply the current solo rules to produced clips
+    └── backfill_face_height.py        ← fill face_height_px on older manifest rows
 ```
 
 ---
@@ -38,7 +48,7 @@ turkish-lipreading-dataset/
 
 Pipeline-2 source videos are **deleted as soon as their clips are exported**, in
 both the local runner and the Colab notebook. Only the trimmed clips survive, so a
-full 4691-row run does not accumulate raw broadcasts on disk.
+full 7109-row run does not accumulate raw broadcasts on disk.
 
 | Runner | Flag | Default |
 |--------|------|---------|
@@ -64,13 +74,15 @@ and transcribes it with Whisper. Overlapping intervals on the same URL are detec
 skipped. **No face filtering and no speaker identity**, so its output cannot go into
 speaker-independent splits until it passes the pipeline-2 filter.
 
-### Pipeline 2 — solo-presenter clips (4691 rows)
+### Pipeline 2 — solo-presenter clips (7109 rows)
 
-Downloads the full broadcast → PySceneDetect scene cuts → keeps only scenes where
-**exactly one face** appears *and* it matches that reporter's reference photo → exports
-each kept scene as its own mp4 → transcribes each clip → appends a row to
-`data/reporter_clips.csv`. **The source broadcast is deleted as soon as its clips are
-exported.**
+Downloads the full broadcast → PySceneDetect scene cuts → samples every 0.2 s and keeps
+only the stretches where **exactly one person** is on screen (YuNet), it matches that
+reporter's reference photo (dlib, voted per face track) and faces the camera → exports
+each kept stretch of at least 2 s as its own mp4 → transcribes each clip → appends a row
+to `data/reporter_clips.csv`. A failing sample cuts a scene rather than discarding it, so
+one insert graphic does not cost a whole single-shot monologue. **The source broadcast
+is deleted as soon as its clips are exported.**
 
 This is the pipeline that matters: its clips are single-speaker, face-verified, and
 carry a `reporter` label that becomes `speaker_id` in Phases 2–3.
@@ -82,22 +94,40 @@ Sources below 720p are **rejected**, not downscaled — the mouth ROI would not 
 #### Reporters
 
 Each reporter needs `pipeline2_reporter_pictures/<slug>.jpeg` as the reference face.
-Row counts are from `video_links.csv` (`pipeline=2`):
+Row counts are from `video_links.csv` (`pipeline=2`); clips and hours from
+`data/reporter_clips.csv` (2026-10-09):
 
-| Reporter | Slug | Channel | Rows |
-|----------|------|---------|-----:|
-| Cüneyt Özdemir | `cuneyt_ozdemir` | Cüneyt Özdemir | 4407 |
-| Fatih Portakal | `fatih_portakal` | Fatih Portakal TV | 76 |
-| Kübra Par | `kubra_par` | TV100 | 60 |
-| Gülşah Ekinci | `gulsah_ekinci` | Halk TV | 39 |
-| Can Okanar | `can_okanar` | A Haber | 30 |
-| Cem Öğretir | `cem_ogretir` | atv Haber | 28 |
-| Serdar Cebe | `serdar_cebe` | Sözcü TV | 26 |
-| Ece Üner | `ece_uner` | Halk TV | 16 |
-| İsmail Küçükkaya | `ismail_kucukkaya` | Halk TV | 9 |
+| Reporter | Slug | Channel | Rows | Done | Clips | Hours |
+|----------|------|---------|-----:|-----:|------:|------:|
+| Cüneyt Özdemir | `cuneyt_ozdemir` | Cüneyt Özdemir | 4622 | 218 | 4376 | 15.03 |
+| Turgay Güler | `turgay_guler` | Turgay Güler | 340 | 166 | 7217 | 10.91 |
+| Hadi Özışık | `hadi_ozisik` | Hadi Özışık | 320 | 160 | 3318 | 14.05 |
+| Ardan Zentürk | `ardan_zenturk` | Ardan Zentürk | 300 | 67 | 4298 | 6.09 |
+| Fatih Portakal | `fatih_portakal` | Fatih Portakal TV | 246 | 208 | 6300 | 11.50 |
+| Osman Gökçek | `osman_gokcek` | Osman Gökçek | 240 | 9 | 6 | 0.00 |
+| Enver Aysever | `enver_aysever` | Enver Aysever | 180 | 96 | 1722 | 4.84 |
+| Ruşen Çakır | `rusen_cakir` | Medyascope | 110 | 77 | 2367 | 10.38 |
+| Sabahattin Önkibar | `sabahattin_onkibar` | Sabahattin Önkibar | 110 | 78 | 8539 | 12.19 |
+| Nagehan Alçı | `nagehan_alci` | Nagehan Alçı | 74 | 2 | 346 | 0.83 |
+| Ece Üner | `ece_uner` | Halk TV | 61 | 35 | 1015 | 2.95 |
+| Kübra Par | `kubra_par` | TV100 | 60 | 59 | 1727 | 8.17 |
+| Can Okanar | `can_okanar` | A Haber | 55 | 37 | 904 | 3.55 |
+| Deniz Zeyrek | `deniz_zeyrek` | Deniz Zeyrek | 55 | 37 | 3553 | 11.69 |
+| İsmail Küçükkaya | `ismail_kucukkaya` | Halk TV | 49 | 21 | 1959 | 5.23 |
+| Levent Gültekin | `levent_gultekin` | Levent Gültekin | 40 | 31 | 5027 | 18.38 |
+| Yılmaz Özdil | `yilmaz_ozdil` | Yılmaz Özdil | 40 | 34 | 3739 | 17.12 |
+| Gülşah Ekinci | `gulsah_ekinci` | Halk TV | 39 | 39 | 2633 | 5.31 |
+| Fatih Altaylı | `fatih_altayli` | Fatih Altaylı | 35 | 24 | 6825 | 14.54 |
+| Özlem Gürses | `ozlem_gurses` | Özlem Gürses | 35 | 35 | 468 | 2.47 |
+| Cem Öğretir | `cem_ogretir` | atv Haber | 28 | 24 | 65 | 0.14 |
+| Serdar Cebe | `serdar_cebe` | Sözcü TV | 26 | 26 | 606 | 2.21 |
+| Ersan Şen | `ersan_sen` | Ersan Şen | 25 | 3 | 294 | 0.64 |
+| Sinan Burhan | `sinan_burhan` | Sinan Burhan | 19 | 17 | 259 | 1.82 |
+| **Total** | | | **7109** | **1503** | **67,563** | **180.0** |
 
-> One speaker is 94% of the corpus. Phase 3 needs speaker-independent val/test splits,
-> so the smaller reporters are what make those splits possible — worth growing.
+> `cuneyt_ozdemir` is 65% of the rows but only 8% of the clip hours so far: most of his
+> rows are still pending. Phase 3 needs speaker-independent val/test splits, so keeping
+> the other 23 reporters growing matters more than finishing his queue.
 
 ---
 
@@ -163,38 +193,48 @@ uv run python scripts/run_all.py
    whose download fails stay pending and are retried on the next run.
 
 ```powershell
-uv run python scripts/run_all.py --exclude-reporters cuneyt_ozdemir  # the other 8 speakers
+uv run python scripts/run_all.py --exclude-reporters cuneyt_ozdemir  # the other 23 speakers
 uv run python scripts/run_all.py --reporters cem_ogretir can_okanar  # named speakers only
 uv run python scripts/run_all.py --pipeline 2                        # skip pipeline-1 rows
 uv run python scripts/run_all.py --limit 50            # first 50 rows after filtering
+uv run python scripts/run_all.py --pipeline 2 --reporters cuneyt_ozdemir --max-hours 15
 uv run python scripts/run_all.py --whisper-model small # faster, lower quality
 uv run python scripts/run_all.py --keep-source         # don't delete source videos
 ```
+
+   Filters apply before `--limit`. `--max-hours` stops pipeline 2 once the selected
+   reporters' clips in `reporter_clips.csv` reach that many hours (existing clips count).
+   `uv run python scripts/run_status.py` prints progress and an ETA for a run in progress.
+   It prints `DURMUS OLABILIR` ("may have stalled") once the log has been quiet for a while, but a long
+   download writes nothing to the log, so check `data/pipeline2_raw/` before killing the run.
+
+   Age-restricted videos ("Sign in to confirm your age") need a logged-in session: put a
+   Netscape-format `cookies.txt` at the repo root, or set `YTDLP_COOKIES_FROM_BROWSER`
+   (e.g. `edge`). Prefer the file; Chrome's App-Bound Encryption blocks cookie extraction.
 
 ---
 
 ## How long a full run takes
 
-Measured on this repo's hardware (RTX A4000 16 GB, CUDA 12.2, 12-thread CPU), with a
-35-video sample of `video_links.csv` averaging **20.5 min** (median 12.8, max 120):
+Measured on this repo's hardware (RTX A4000 16 GB, CUDA 12.2, 12-thread CPU): Whisper
+large-v3 runs at **2.63× realtime on GPU**, and a 35-video sample of `video_links.csv`
+averages **20.5 min** a video (median 12.8, max 120).
 
-| Stage | Rate | Whole CSV (4691 videos ≈ 1600 h audio) | Without `cuneyt_ozdemir` (284 videos ≈ 97 h) |
-|-------|------|---------------------------------------:|---------------------------------------------:|
-| Whisper large-v3 (GPU) | 2.63× realtime | ~610 h | ~37 h |
-| Scene detection | ~600 fps | ~65 h | ~4 h |
-| Face identity checks | ≤20 × ~1 s / video | ~26 h | ~2 h |
-| Clip export (libx264 re-encode) | ~5× realtime | ~235 h | ~14 h |
-| **Total (serial)** | | **~5–6 weeks** | **~2.5 days** |
+At that rate the 5606 pending pipeline-2 rows (2026-10-09) are ~1915 h of broadcast:
+**~4–5 weeks serial for everything, ~1 week excluding `cuneyt_ozdemir`** (1202 rows).
+Those are upper bounds, since pipeline 2 only transcribes the kept clips, not the whole
+broadcast. Downloads are a real share of it: YouTube serves ~300–400 KB/s per video
+here, so a 2.4 GB two-hour 1080p broadcast takes about two and a half hours to arrive.
 
-For reference, Whisper on **CPU** measures 2.45× realtime for `small` and ~0.4× for
-`large-v3` — roughly 6× slower, which is why the CUDA index in `pyproject.toml` matters.
+Whisper on **CPU** measures 2.45× realtime for `small` and ~0.4× for `large-v3`,
+roughly 6× slower, which is why the CUDA index in `pyproject.toml` matters.
 
 Two consequences worth planning around:
 
-- **Reporter order.** `cuneyt_ozdemir` occupies CSV rows 235–4641, so an unfiltered run
-  reaches `cem_ogretir` and `can_okanar` only after ~4400 videos of a single speaker.
-  Since that speaker is already 94% of the corpus and Phase 3 needs speaker-independent
-  splits, run `--exclude-reporters cuneyt_ozdemir` first.
+- **Reporter order.** 4404 of `cuneyt_ozdemir`'s 4622 rows are pending and sit at the
+  back of the CSV (rows 2466–7118, after `scripts/reorder_links.py`), so an unfiltered run
+  works through the other reporters first. `--exclude-reporters cuneyt_ozdemir` makes
+  that explicit.
 - **Clip export is ~25% of the runtime** because `export_clip` re-encodes with libx264.
   Single-shot videos now produce one clip spanning the whole file, where `-c copy` would
   be near-instant and lossless — but stream copy snaps to keyframes, which can pull a
@@ -249,8 +289,13 @@ hand. The inputs live at the repo root (`video_links.csv`, `pipeline2_reporter_p
 | `test_run/` | `test_data_pipe.py` | Isolated copy of all of the above; the real CSV is never touched. |
 
 `reporter_clips.csv` columns: `reporter, source_url, source_video, clip_file, start_sec,
-end_sec, duration_sec, transcript_text, transcript_json`. Paths are posix-style so a
-manifest written on Windows can be read on Colab/Linux.
+end_sec, duration_sec, face_height_px, transcript_text, transcript_json`. Paths are
+posix-style so a manifest written on Windows can be read on Colab/Linux.
+
+`face_height_px` is the median presenter face height over the clip. It is recorded,
+never used as a filter: TV studio reporters sit at 126–137 px while personal channels
+reach ~535 px, so a hard floor would remove whole speakers. Phases 2 and 3 pick their own
+threshold. An empty value means unmeasurable, not zero.
 
 Transcript JSON (both pipelines share the schema):
 
