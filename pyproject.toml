@@ -19,6 +19,7 @@ dependencies = [
     "face-recognition",
     "dlib-bin",
     "imageio-ffmpeg",
+    "zeyrek",
     # face_recognition_models still imports pkg_resources, which setuptools 81 removed.
     "setuptools<81",
 ]

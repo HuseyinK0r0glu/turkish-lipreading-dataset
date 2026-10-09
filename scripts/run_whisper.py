@@ -5,6 +5,8 @@ import unicodedata
 
 import whisper
 
+from lemmatize import lemmatize_word
+
 VIDEO_DIR = "data/raw_videos"
 OUTPUT_DIR = "data/transcripts"
 
@@ -63,7 +65,7 @@ def transcribe_videos(video_dir=VIDEO_DIR, output_dir=OUTPUT_DIR, model_name="la
 
                 word_data = {
                     "surface_form": surface,
-                    "lemma": surface,  # TODO: add lemma later (e.g. via zeyrek MorphAnalyzer)
+                    "lemma": lemmatize_word(surface),
                     "start_sec": round(w["start"], 3),
                     "end_sec": round(w["end"], 3),
                     "confidence": confidence,

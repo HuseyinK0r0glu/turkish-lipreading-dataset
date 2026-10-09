@@ -25,6 +25,7 @@ from presenter_filter import (  # noqa: E402
     safe_name,
     solo_segments,
 )
+from lemmatize import lemmatize_word  # noqa: E402
 from run_whisper import normalize_text  # noqa: E402
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -139,7 +140,7 @@ def transcribe_clip(clip_path: Path, out_json: Path, model_name="large-v3") -> s
             confidence = round(w.get("probability", 1.0), 6)
             seg_data["words"].append({
                 "surface_form": surface,
-                "lemma": surface,  # TODO: zeyrek, mirrors run_whisper.py
+                "lemma": lemmatize_word(surface),
                 "start_sec": round(w["start"], 3),
                 "end_sec": round(w["end"], 3),
                 "confidence": confidence,
