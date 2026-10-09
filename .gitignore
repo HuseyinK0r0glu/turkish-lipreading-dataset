@@ -9,3 +9,6 @@ venv/
 venv311/
 # YouTube session cookies - CREDENTIALS, never commit
 cookies.txt
+# Phase 2 model weights - downloaded on first use (syncnet_v2.model is 54 MB)
+models/face_landmarker.task
+models/syncnet_v2.model

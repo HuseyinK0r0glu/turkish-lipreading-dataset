@@ -10,6 +10,28 @@ clips, 180.0 h, 24 reporters, `face_height_px` filled on every row. That is alre
 the 100 h raw-video target, so Phase 2 can start on the existing manifest while the
 Phase 1 run continues to append to it.
 
+**Implemented 2026-10-09 in `scripts/phase2/`** (entry point `run_phase2.py`; README
+"Phase 2"). Where the code departs from this plan, and why:
+
+- **Storage (§2.1, §2.2):** one `data/lip_crops/<reporter>/<stem>.npz` per *source* clip,
+  every frame stored once; word/sentence rows carry `npz_path` + `frame_start`/`frame_end`.
+  Per-word files would store each frame ~4x because of the ±15-frame padding. A sample of
+  400 transcripts gives ~1.2 M words in 180 h, which is ~340 GB uncompressed, and the
+  disk has ~217 GB free.
+- **Landmarks (§4.2):** MediaPipe's built-in detector is short-range and finds no face
+  on full studio frames (`kubra_par`: 1 good frame of 713). People are counted with
+  Phase 1's YuNet rule every 5 frames, and MediaPipe runs on a crop around that face.
+- **SyncNet (§4.5):** only the network is vendored (`syncnet_model.py`, MIT). The scoring
+  is a streaming rewrite of `evaluate` and reproduces the demo (offset 3, conf 10.05 vs
+  10.02).
+- **Off-screen threshold (§4.5.1):** `WORD_SYNC_MIN = 2.5`, chosen with
+  `calibrate_offscreen.py`, which splices another reporter's audio into the second half
+  of a clip. At 2.5, 98.8% of real words are kept and 97.6% of foreign-audio words are
+  dropped. 21 of 38 half-foreign clips still passed the clip-level SyncNet ≥ 3.
+  `LIP_MOTION_MIN` stays unset. The hand-labelled check on real broadcasts is still to do.
+- **Layout (§5):** a `scripts/phase2/` package of single-purpose modules instead of four
+  `phase2_*.py` scripts. Phase 1 code is imported, not edited.
+
 ---
 
 ## 0. Goal of Phase 2 (from the project plan)

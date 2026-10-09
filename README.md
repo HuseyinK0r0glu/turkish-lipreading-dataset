@@ -20,7 +20,7 @@ turkish-lipreading-dataset/
 ├── video_links.csv                    ← THE input for both pipelines (url, channel, start, end, pipeline, reporter, completed)
 ├── cookies.txt                        ← optional, gitignored; YouTube session for age-restricted videos
 ├── pipeline2_reporter_pictures/       ← reference face photos, one <slug>.jpeg per reporter
-├── models/                            ← YuNet face detector (auto-downloaded if missing)
+├── models/                            ← YuNet, MediaPipe and SyncNet weights (auto-downloaded if missing)
 ├── plans/PHASE2_PLAN.md               ← Phase 2 design (lip extraction + SyncNet)
 ├── pyproject.toml                     ← uv-managed dependencies
 ├── .python-version                    ← 3.12
@@ -39,7 +39,19 @@ turkish-lipreading-dataset/
     ├── reset_empty_rows.py            ← un-complete rows that yielded zero clips, so they retry
     ├── defer_low_res.py               ← probe pending rows, move sub-720p ones to the end
     ├── audit_clips.py                 ← re-apply the current solo rules to produced clips
-    └── backfill_face_height.py        ← fill face_height_px on older manifest rows
+    ├── backfill_face_height.py        ← fill face_height_px on older manifest rows
+    └── phase2/                        ← Phase 2: mouth crops + SyncNet (see "Phase 2" below)
+        ├── run_phase2.py              ← entry point: reporter_clips.csv → crops + manifests
+        ├── source_clip.py             ← one solo clip end to end (the worker task)
+        ├── video_io.py                ← 25 fps ffmpeg decode, 16 kHz audio
+        ├── landmarks.py               ← YuNet head count + MediaPipe Face Landmarker
+        ├── mouth_roi.py               ← tracking gaps, smoothed 88×88 mouth crops
+        ├── syncnet.py                 ← streaming SyncNet scoring (clip + per-frame)
+        ├── syncnet_model.py           ← SyncNet network, vendored (MIT)
+        ├── segments.py                ← word / sentence slicing rules
+        ├── manifests.py               ← input snapshot + channel join, output CSVs, resume
+        ├── phase2_status.py           ← read-only progress/ETA snapshot of a live run
+        └── qc_report.py               ← contact sheets + distribution summary
 ```
 
 ---
@@ -314,3 +326,86 @@ Transcript JSON (both pipelines share the schema):
   }]
 }
 ```
+
+---
+
+## Phase 2 — mouth crops + SyncNet
+
+`scripts/phase2/run_phase2.py` turns the solo clips in `data/reporter_clips.csv` into
+88×88 grayscale mouth crops at a fixed 25 fps, scores audio-visual sync with SyncNet, and
+cuts word and sentence items out of each clip's transcript. Design and rationale:
+`plans/PHASE2_PLAN.md`. Phase 1 code is imported, never modified; Phase 2 reads
+`reporter_clips.csv` as a snapshot and never writes it, so it can run while Phase 1 is
+still appending.
+
+```powershell
+uv run python scripts/phase2/run_phase2.py --reporters kubra_par --limit 20  # pilot
+uv run python scripts/phase2/run_phase2.py --exclude-reporters cuneyt_ozdemir
+uv run python scripts/phase2/run_phase2.py --workers 8
+uv run python scripts/phase2/phase2_status.py --follow    # progress/ETA of a live run
+uv run python scripts/phase2/qc_report.py                 # contact sheets + summary
+uv run python scripts/phase2/calibrate_offscreen.py      # WORD_SYNC_MIN evidence
+```
+
+It is resumable the same way Phase 1 is: a source clip is finished once it has a row in
+`data/phase2/face_track_report.csv` (written last), and a clip that crashed half-way has
+its partial rows removed on the next start. The NUL padding a power cut leaves at the end
+of those CSVs is cut off at that point too.
+
+**Setup.** `uv sync` installs `mediapipe`, `python-speech-features` and `scipy`. The
+MediaPipe face landmarker (`models/face_landmarker.task`) and the SyncNet weights
+(`models/syncnet_v2.model`, 54 MB, from the authors' VGG page) download on first use and
+are gitignored. Only SyncNet's network definition is vendored
+(`scripts/phase2/syncnet_model.py`, MIT, from
+[joonson/syncnet_python](https://github.com/joonson/syncnet_python)); the scoring is a
+streaming rewrite of its `evaluate` that reproduces the reference demo
+(`example.avi`: offset 3, confidence 10.05 vs the published 10.02):
+
+```powershell
+uv run python scripts/phase2/syncnet.py --selftest path\to\example.avi
+```
+
+**Per clip:**
+
+1. Decode at 25 fps through one ffmpeg pipe; frame *k* is time *k*/25.
+2. Count people on set with Phase 1's YuNet rule (`presenter_filter.detect_faces` +
+   `is_on_set`) every 5 frames, Phase 1's 0.2 s cadence. MediaPipe's Face Landmarker
+   runs on a crop around the presenter's face: its own detector is short-range and finds
+   nothing on a full studio frame, where the face is ~130 px of 1080.
+3. Mark gaps: no face, a second person, a mouth jump of more than half a face width, or
+   implausible lip landmarks. Detector blinks of up to 2 frames are bridged.
+4. Crop the mouth from a smoothed lip box grown 0.4× on each side → 88×88 grayscale.
+   `mouth_width_px` is recorded in source pixels and never used as a filter.
+5. SyncNet on smoothed 224×224 face crops. Clips scoring below 3 are discarded. The best
+   A/V offset shifts every word window, and the framewise confidence gives each word its
+   `word_sync_conf`, the off-screen-speech signal. Words below `WORD_SYNC_MIN = 2.5` are
+   dropped. `calibrate_offscreen.py` measured that threshold by splicing another
+   reporter's audio into half of each clip: it keeps 98.8% of real words and drops 97.6%
+   of foreign-audio ones, while the clip-level score alone passed 21 of 38 half-foreign
+   clips. A sentence is dropped when more than 30% of its words fail.
+6. Words: the Whisper span ±15 frames. A word is dropped when its own span crosses a gap;
+   the padding stops early at a gap (`track_ok = 0`). Sentences: Whisper segments of
+   1–8 s, longer ones split at the pause nearest the middle.
+
+**Storage.** One `data/lip_crops/<reporter>/<clip stem>.npz` per source clip holds every
+frame once (`frames` uint8 `(T, 88, 88)`, plus `good` and the framewise `sync_conf`).
+Word and sentence rows point into it with `npz_path` + `frame_start`/`frame_end`
+(end-exclusive). A file per word would store each frame about 4 times over, because of
+the ±15-frame padding. At ~1.2 M words that is ~340 GB uncompressed, more than this disk
+holds. Per-class LRW-style files can be cut for the classes Phase 3 picks.
+
+| File in `data/phase2/` | One row per |
+|------|------|
+| `word_clips.csv` | kept word: label, speaker, channel, frame range, Whisper confidence, `word_sync_conf`, `lip_motion`, pose, sizes |
+| `sentence_clips.csv` | kept sentence: `text`, frame range, `word_spans` (JSON, times relative to the sentence start) |
+| `syncnet_scores.csv` | scored source clip: `syncnet_score`, `syncnet_offset`, passed |
+| `discarded.csv` | dropped source clip, word or sentence, with a reason |
+| `face_track_report.csv` | processed source clip: frame status counts, words/sentences kept |
+
+Throughput on this machine (RTX A4000, 20 threads): ~1.5× realtime per worker. 6 workers
+process 0.18 h of clips in 86 s including start-up, and 10 workers are no faster because
+MediaPipe's own threads already fill the CPU. The 180 h corpus is roughly a day of
+running.
+
+`channel` comes from joining `reporter_clips.csv` to `video_links.csv` on the YouTube
+video id, and is written into every Phase 2 manifest.

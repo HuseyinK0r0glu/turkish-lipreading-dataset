@@ -15,7 +15,7 @@ turkish-lipreading-dataset/
 ├── .python-version              ← 3.12
 ├── uv.lock                      ← committed lockfile
 ├── pipeline2_reporter_pictures/ ← reference face photo per reporter (<slug>.jpeg)
-├── models/                     ← YuNet face detector (auto-downloaded if missing)
+├── models/                     ← YuNet (committed); MediaPipe + SyncNet weights auto-download, gitignored
 ├── plans/PHASE2_PLAN.md
 ├── colab_run_all.ipynb          ← Colab GPU runner (self-contained reimplementation)
 ├── scripts/
@@ -31,7 +31,16 @@ turkish-lipreading-dataset/
 │   ├── reset_empty_rows.py      ← un-complete rows that yielded zero clips, so they retry
 │   ├── defer_low_res.py         ← probe pending rows, move sub-720p ones to the end
 │   ├── audit_clips.py           ← re-apply the CURRENT solo rules to produced clips
-│   └── backfill_face_height.py  ← fill face_height_px on pre-existing manifest rows
+│   ├── backfill_face_height.py  ← fill face_height_px on pre-existing manifest rows
+│   └── phase2/                  ← Phase 2 (own folder; imports Phase 1 code, never edits it)
+│       ├── run_phase2.py        ← ENTRY POINT: reporter_clips.csv snapshot → crops + manifests
+│       ├── source_clip.py       ← one solo clip end to end (the worker task)
+│       ├── video_io.py / landmarks.py / mouth_roi.py / syncnet.py / segments.py
+│       ├── manifests.py         ← input join (channel), output CSV schemas, resume
+│       ├── syncnet_model.py     ← vendored SyncNet network (MIT)
+│       ├── phase2_status.py     ← read-only progress/ETA snapshot of a live run (`--follow`)
+│       ├── qc_report.py         ← contact sheets + distribution summary
+│       └── calibrate_offscreen.py ← spliced-audio evidence for WORD_SYNC_MIN
 └── data/                        ← ALL generated; gitignored. Nothing is placed here by hand.
 ```
 
@@ -139,7 +148,7 @@ Transcript JSON schema (read-only contract for Phase 2):
 | Phase | Status |
 |-------|--------|
 | 1 — Download + Whisper ASR | Paused at the 180 h mark. 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
-| 2 — Lip extraction + SyncNet | Designed in `plans/PHASE2_PLAN.md`, no code |
+| 2 — Lip extraction + SyncNet | Code in `scripts/phase2/`, piloted on 111 clips / 10 reporters and calibrated (`WORD_SYNC_MIN` 2.5). Full run over all 67,563 clips started 2026-10-09 (~23 h, log `data/phase2_run.log`). QC review + hand-labelled off-screen check pending. |
 | 3 — Dataset splits + benchmark | Not started |
 | 4–5 — Models + release | Not started |
 
@@ -197,6 +206,26 @@ speaker (Cüneyt Özdemir), which strains speaker-independent splits.
    `download_videos()` returns the set of keys that need no further work.
 8. **`normalize_text` strips.** Whisper word tokens carry a leading space; without the
    strip, " Yargı" and "Yargı" become two word classes in Phase 3.
+
+### Phase 2 (`scripts/phase2/`)
+
+9. **Phase 2 never writes `reporter_clips.csv`.** It reads a snapshot; Phase 1 may be
+   appending. Resume state is Phase 2's own `face_track_report.csv`, written LAST per
+   source clip; `manifests.drop_unfinished` clears rows of a clip that crashed mid-write.
+10. **Heads are counted with Phase 1's YuNet rule, not MediaPipe.** MediaPipe's built-in
+   detector is short-range: on a full studio frame (face ~130 px of 1080) it finds
+   nothing, so `kubra_par` came out 1 good frame in 713. MediaPipe only runs on a crop
+   around the YuNet face. YuNet runs every 5 frames (0.2 s, Phase 1's cadence, and >half
+   the runtime when run on every frame); a multi-face sample marks the frames back to
+   the previous sample (`RoiStream._spread_head_counts`).
+11. **Crops are stored once per SOURCE clip** (`lip_crops/<reporter>/<stem>.npz`) and
+   items are `frame_start`/`frame_end` ranges into it. Per-word files would store each
+   frame ~4x (±15-frame padding): ~1.2 M words ≈ 340 GB raw, more than the disk.
+12. **Word spans are shifted by `syncnet_offset`** before mapping to frames: Whisper
+   times are audio time; the mouth lags the audio by that many frames.
+13. **`syncnet.py` must keep reproducing the reference demo** (`--selftest example.avi`
+   → offset 3, conf ~10.0). It is a streaming rewrite of `SyncNetInstance.evaluate`;
+   the clip score, the window→frame mapping and the medfilt(9) are load-bearing.
 
 ---
 
