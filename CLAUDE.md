@@ -27,7 +27,7 @@ turkish-lipreading-dataset/
 │   ├── pipeline2.py             ← pipeline 2 orchestration + per-clip Whisper
 │   ├── presenter_filter.py      ← pipeline 2 ENGINE (download, scene detect, face filter)
 │   ├── lemmatize.py             ← zeyrek lemma per word + transcript backfill CLI
-│   ├── run_more_data.cmd        ← 2026-10-11 chain: more pipeline-2 rows, then Phase 2 again
+│   ├── run_more_data.cmd        ← 2026-10-11 chain: six new presenters, then Phase 2 again
 │   ├── merge_links.py           ← idempotent append into video_links.csv, keeps `completed`
 │   ├── reorder_links.py         ← push a reporter's pending rows to the end of the queue
 │   ├── reset_empty_rows.py      ← un-complete rows that yielded zero clips, so they retry
@@ -151,14 +151,14 @@ transcripts 2026-10-11). `manual_review = 1` when `confidence < 0.7`.
 
 | Phase | Status |
 |-------|--------|
-| 1 — Download + Whisper ASR | Resumed 2026-10-11 for the vocabulary target (`scripts/run_more_data.cmd`: 971 pending rows without cuneyt_ozdemir/osman_gokcek, then cuneyt_ozdemir to 85 h, then Phase 2 again into `data/phase2/`, old output in `data/phase2_v1/`). Was paused at the 180 h mark: 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
+| 1 — Download + Whisper ASR | Resumed 2026-10-11 (`scripts/run_more_data.cmd`): 297 rows of six NEW presenters for speaker/channel diversity — selcuk_tepeli (NOW), ekrem_acikel (Sözcü TV), sinem_fistikoglu (Halk TV), seda_selek (KOZA TV), irfan_degirmenci, sule_aydin (own channels); then Phase 2 again over everything into `data/phase2/`, v1 output in `data/phase2_v1/`. Their reference photos were picked automatically (dominant face across episodes) and still need a human check. 971 older pending rows remain for later. Was paused at the 180 h mark: 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
 | 2 — Lip extraction + SyncNet | Done 2026-10-10. All 67,563 clips processed (resumed once after a power cut, 0 failed): 61,825 ok / 5,505 low_sync / 233 no_words; 1,100,215 word clips (89.1% of ASR words) and 163,399 sentence clips; 61,697 crop `.npz` in `data/lip_crops/`. Progress: `scripts/phase2/phase2_status.py`. QC review + hand-labelled off-screen check pending. |
 | 3 — Dataset splits + benchmark | Not started |
 | 4–5 — Models + release | Not started |
 
 Vocabulary (2026-10-11, `vocab_report.py`, val levent_gultekin, test yilmaz_ozdil + ozlem_gurses):
 only 342 surface / 482 lemma classes reach 300 train examples, below the 500 target —
-hence the extra data; projected ~650-875 surface / ~800-1000 lemma after `run_more_data`.
+hence the extra data. Audit of 50 random v1 items: `data/audit50/README.md`.
 
 Known gaps: `channel` is not propagated into
 `reporter_clips.csv` (see PHASE2_PLAN §1.2); 4622 of 7109 pipeline-2 rows are a single
