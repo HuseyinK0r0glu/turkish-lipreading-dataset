@@ -26,6 +26,8 @@ turkish-lipreading-dataset/
 │   ├── run_whisper.py           ← Whisper ASR + NFC/strip normalization
 │   ├── pipeline2.py             ← pipeline 2 orchestration + per-clip Whisper
 │   ├── presenter_filter.py      ← pipeline 2 ENGINE (download, scene detect, face filter)
+│   ├── lemmatize.py             ← zeyrek lemma per word + transcript backfill CLI
+│   ├── run_more_data.cmd        ← 2026-10-11 chain: more pipeline-2 rows, then Phase 2 again
 │   ├── merge_links.py           ← idempotent append into video_links.csv, keeps `completed`
 │   ├── reorder_links.py         ← push a reporter's pending rows to the end of the queue
 │   ├── reset_empty_rows.py      ← un-complete rows that yielded zero clips, so they retry
@@ -41,6 +43,7 @@ turkish-lipreading-dataset/
 │       ├── phase2_status.py     ← read-only progress/ETA snapshot of a live run (`--follow`)
 │       ├── qc_report.py         ← contact sheets + distribution summary
 │       └── calibrate_offscreen.py ← spliced-audio evidence for WORD_SYNC_MIN
+│   └── phase3/vocab_report.py   ← classes with >= 300 TRAIN examples under a speaker split
 └── data/                        ← ALL generated; gitignored. Nothing is placed here by hand.
 ```
 
@@ -139,7 +142,8 @@ it for rows written before the column existed.
 Transcript JSON schema (read-only contract for Phase 2):
 `segments[] → {start_sec, end_sec, text, words[]}`, each word
 `{surface_form, lemma, start_sec, end_sec, confidence, manual_review}`.
-`lemma == surface_form` for now (TODO: zeyrek). `manual_review = 1` when `confidence < 0.7`.
+`lemma` = `lemmatize.lemmatize_word(surface_form)` (zeyrek, lower-cased; backfilled into all
+transcripts 2026-10-11). `manual_review = 1` when `confidence < 0.7`.
 
 ---
 
@@ -147,12 +151,16 @@ Transcript JSON schema (read-only contract for Phase 2):
 
 | Phase | Status |
 |-------|--------|
-| 1 — Download + Whisper ASR | Paused at the 180 h mark. 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
+| 1 — Download + Whisper ASR | Resumed 2026-10-11 for the vocabulary target (`scripts/run_more_data.cmd`: 971 pending rows without cuneyt_ozdemir/osman_gokcek, then cuneyt_ozdemir to 85 h, then Phase 2 again into `data/phase2/`, old output in `data/phase2_v1/`). Was paused at the 180 h mark: 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
 | 2 — Lip extraction + SyncNet | Done 2026-10-10. All 67,563 clips processed (resumed once after a power cut, 0 failed): 61,825 ok / 5,505 low_sync / 233 no_words; 1,100,215 word clips (89.1% of ASR words) and 163,399 sentence clips; 61,697 crop `.npz` in `data/lip_crops/`. Progress: `scripts/phase2/phase2_status.py`. QC review + hand-labelled off-screen check pending. |
 | 3 — Dataset splits + benchmark | Not started |
 | 4–5 — Models + release | Not started |
 
-Known gaps: `lemma == surface_form` (zeyrek pending); `channel` is not propagated into
+Vocabulary (2026-10-11, `vocab_report.py`, val levent_gultekin, test yilmaz_ozdil + ozlem_gurses):
+only 342 surface / 482 lemma classes reach 300 train examples, below the 500 target —
+hence the extra data; projected ~650-875 surface / ~800-1000 lemma after `run_more_data`.
+
+Known gaps: `channel` is not propagated into
 `reporter_clips.csv` (see PHASE2_PLAN §1.2); 4622 of 7109 pipeline-2 rows are a single
 speaker (Cüneyt Özdemir), which strains speaker-independent splits.
 
@@ -226,6 +234,16 @@ speaker (Cüneyt Özdemir), which strains speaker-independent splits.
 13. **`syncnet.py` must keep reproducing the reference demo** (`--selftest example.avi`
    → offset 3, conf ~10.0). It is a streaming rewrite of `SyncNetInstance.evaluate`;
    the clip score, the window→frame mapping and the medfilt(9) are load-bearing.
+14. **`segments.segment_words` joins apostrophe suffixes** ("Erdoğan" + "'ın" →
+   "Erdoğan'ın"): Whisper splits them, and 2.4% of word items were bare suffixes.
+   Word and sentence items both read it, so word indices stay aligned with `sync_ok`.
+15. **Sentence windows cover their words**, not just Whisper's segment bounds: the
+   segment start is often after the first word's start, and 9.2% of v1 sentence
+   clips opened mid-word. Words longer than `WORD_MAX_SEC` (2 s) and non-Latin labels
+   are Whisper failures and are discarded.
+16. **`lemmatize._patch_shared_attrs` must stay.** zeyrek 0.1.3 shares a lexicon set
+   with every search path and mutates it: after "vermek", "veriyor" has no analysis.
+   Without the patch a word's lemma depends on which files were processed before it.
 
 ---
 

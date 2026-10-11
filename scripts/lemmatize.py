@@ -8,11 +8,18 @@ zeyrek has no sentence-level disambiguation, so `lemmatize_word` picks ONE lemma
 word, deterministically and without context:
 
   1. punctuation is stripped from the ends of the token ("karar," -> "karar");
-  2. the lemma proposed by most of zeyrek's analyses wins, ties go to the analyzer's
-     own order. "karara" is therefore "kararmak" or "karar" depending on that order --
-     the choice is stable, not always linguistically right. Phase 3 should treat
-     `lemma` as a grouping key, not as ground truth;
-  3. a token zeyrek cannot analyse (numbers, "%50", foreign names, ASR noise) falls
+  2. among zeyrek's analyses the most plausible for news speech wins: fewest
+     morphemes rare in news (optative, imperative, 2nd person; abbreviations; a
+     proper-noun reading of a lower-case token; a two-letter open-class root), then
+     the shortest analysis, then a closed-class reading (pronoun, conjunction,
+     postposition...), then a root left intact at the start of the word, then the
+     lemma most analyses propose, then the longer lemma, then the analyzer's order.
+     Majority vote alone picked "iç" for "için", "bun" for "bunu", "türki" for
+     "Türkiye", "bilemek" for "biliyor".
+     Still context-free -- Phase 3 should treat `lemma` as a grouping key, not as
+     ground truth;
+  3. the lemma is Turkish-lower-cased and circumflex-folded ("âmâ" -> "ama");
+  4. a token zeyrek cannot analyse (numbers, "%50", foreign names, ASR noise) falls
      back to its Turkish-lowercased surface form, so "Xyz" and "xyz" do not become two
      word classes.
 
@@ -46,6 +53,38 @@ TRANSCRIPT_DIRS = [ROOT / "data" / "transcripts", ROOT / "data" / "reporter_tran
 
 _analyzer = None
 
+# Disambiguation (see lemmatize_word). Morphemes that are rare in news speech: an
+# analysis that needs one loses to one that does not ("karara" is karar+Dat, not the
+# optative of kararmak; "bunu" is bu+Acc, not bun+Acc).
+_RARE_IN_NEWS = {"Opt", "Imp", "P2sg", "P2pl", "A2sg", "Neces", "Desr", "Cond"}
+_CLOSED_CLASS = {"Pron", "Conj", "Postp", "Det", "Ques", "Adv", "Interj", "Num"}
+# zeyrek's lexicon spells some lemmas with circumflexes ("âmâ", "siyasî", "hâlâ");
+# speech and Whisper do not, so "ama" and "âmâ" must not be two classes.
+_FOLD_CIRCUMFLEX = str.maketrans("âîûÂÎÛ", "aiuAİU")
+
+
+def _patch_shared_attrs():
+    """zeyrek 0.1.3 bug: results depend on which words were analysed before.
+
+    SearchPath.initial hands the stem transition's own `attrs` set to the new search
+    path, and the search mutates the path's set in place -- so analysing "vermek"
+    permanently edits the lexicon entry for "ver", and "veriyor" afterwards gets no
+    analysis at all (and fell back to its surface form). Over a corpus that silently
+    made a word's lemma depend on file order. Give every path its own copy.
+    """
+    from zeyrek.morphotactics import SearchPath
+    if getattr(SearchPath, "_attrs_copied", False):
+        return
+    original = SearchPath.initial.__func__
+
+    def initial(cls, stem_transition, tail):
+        path = original(cls, stem_transition, tail)
+        path.phonetic_attributes = set(path.phonetic_attributes)
+        return path
+
+    SearchPath.initial = classmethod(initial)
+    SearchPath._attrs_copied = True
+
 
 def _get_analyzer():
     global _analyzer
@@ -54,6 +93,7 @@ def _get_analyzer():
         # zeyrek logs every analysis candidate ("APPENDING RESULT: ...") at WARNING,
         # which floods the console for a corpus-sized run.
         logging.getLogger("zeyrek").setLevel(logging.ERROR)
+        _patch_shared_attrs()
         _analyzer = zeyrek.MorphAnalyzer()
     return _analyzer
 
@@ -80,20 +120,39 @@ def lemmatize_word(surface: str) -> str:
         return surface  # pure punctuation: nothing to lemmatize
 
     analyses = _get_analyzer()._parse(word)
+    if not analyses:
+        return turkish_lower(word).translate(_FOLD_CIRCUMFLEX)
 
-    votes = collections.Counter()
-    first_seen = {}  # lower-cased lemma -> first spelling, in analyzer order
-    for a in analyses:
+    votes = collections.Counter(turkish_lower(a.dict_item.lemma) for a in analyses)
+    lowered = turkish_lower(word)
+    lowercase_input = word[:1] == lowered[:1]
+
+    def rank(item):
+        order, a = item
+        ids = {m[0].id_ for m in a.morphemes}
+        pos = a.dict_item.primary_pos.value
+        # a pronoun carries its own person ("sana" = sen+A2sg+Dat): not a rare suffix
+        penalty = 0 if pos == "Pron" else len(ids & _RARE_IN_NEWS)
+        secondary = str(a.dict_item.secondary_pos)  # "SecondaryPos.ProperNoun", ...
+        if "Abbreviation" in secondary:
+            penalty += 1
+        if lowercase_input and "ProperNoun" in secondary:
+            penalty += 1
         lemma = a.dict_item.lemma
-        key = turkish_lower(lemma)
-        votes[key] += 1
-        first_seen.setdefault(key, lemma)
-    if not votes:
-        return turkish_lower(word)
+        low = turkish_lower(lemma)
+        open_class = pos not in _CLOSED_CLASS
+        if open_class and len(low) <= 2 and low != lowered:
+            penalty += 1  # "dolar" -> do+A3pl, "aslında" -> as: two-letter roots are noise
+        root = low[:-3] if pos == "Verb" and low.endswith(("mak", "mek")) else low
+        intact = lowered.startswith(root)  # "biliyor": bil(mek) yes, bile(mek) no
+        return (penalty, len(a.morphemes), open_class, not intact,
+                -votes[low], -len(lemma), order)
 
-    # max() returns the first maximal key in iteration order, i.e. the earliest seen.
-    best = max(first_seen, key=lambda k: votes[k])
-    return first_seen[best]
+    best = min(enumerate(analyses), key=rank)[1]
+    # Lower-cased: zeyrek returns "Kemal" (proper) and "kemal" (noun) in an order that
+    # follows set iteration, i.e. Python's per-process hash seed, so the spelling of a
+    # tie was not reproducible between runs. A grouping key needs no capital.
+    return turkish_lower(best.dict_item.lemma).translate(_FOLD_CIRCUMFLEX)
 
 
 def lemmatize_transcript(data: dict) -> int:

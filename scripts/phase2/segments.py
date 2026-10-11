@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from lemmatize import lemmatize_word
 from run_whisper import normalize_text
 from video_io import FPS, frame_of
 
@@ -20,6 +21,14 @@ SENT_MAX_SEC = 8.0
 # A pause this close to the middle of an over-long sentence is preferred over a
 # slightly longer one at its edge: pieces should come out balanced.
 SPLIT_CENTRE_ZONE = 0.5
+# Whisper word timings this long are alignment failures, not words: the audit found
+# "radiyotik" at 10.06-25.18 s (a 408-frame item). The longest real words in the
+# corpus ("Cumhurbaşkanlığı'nın") take ~1.5 s.
+WORD_MAX_SEC = 2.0
+APOSTROPHES = "'’"
+# Turkish + the Latin letters of foreign names; anything else in a label is Whisper
+# drifting into another script ("y吓ai", "прям", "근�ada").
+_LATIN_EXTRA = set("çğıöşüâîûÇĞİÖŞÜÂÎÛéèêëáàäóòôúùñßøåæœ")
 
 
 @dataclass
@@ -96,17 +105,59 @@ def _discard(level, item_id, text, reason, detail=""):
             "detail": detail}
 
 
+def _latin_label(text: str) -> bool:
+    return all(c.isascii() or c in _LATIN_EXTRA or not c.isalpha() for c in text)
+
+
+def segment_words(transcript: dict) -> List[Tuple[dict, List[dict]]]:
+    """(segment, words) with apostrophe suffixes joined to the word before them.
+
+    Whisper tokenizes "Erdoğan'ın" as "Erdoğan" + "'ın". Left apart, 2.4% of word
+    items were bare suffixes ("'nin" alone: 3,247) and the stem became its own class.
+    Joined, the item spans the whole spoken word and is labelled with it. A suffix
+    with nothing before it in its segment stays alone and word_items drops it.
+    """
+    out = []
+    for seg in transcript.get("segments", []):
+        words = []
+        for w in seg.get("words", []):
+            surface = normalize_text(w.get("surface_form", ""))
+            if words and surface[:1] in APOSTROPHES and len(surface) > 1:
+                prev = words[-1]
+                joined = prev["surface_form"] + surface
+                confs = [c for c in (prev.get("confidence"), w.get("confidence"))
+                         if isinstance(c, (int, float))]
+                conf = min(confs) if confs else ""
+                words[-1] = dict(prev, surface_form=joined, lemma=lemmatize_word(joined),
+                                 end_sec=w["end_sec"], confidence=conf,
+                                 manual_review=int(conf != "" and conf < 0.7))
+            else:
+                words.append(dict(w, surface_form=surface))
+        out.append((seg, words))
+    return out
+
+
 def word_items(stem: str, transcript: dict, track: Track, th: Thresholds):
     """-> (kept word dicts, discard dicts, {word_index: passes_sync})."""
     kept, discards, sync_ok = [], [], {}
     idx = -1
-    for seg in transcript.get("segments", []):
-        for w in seg.get("words", []):
+    for _seg, words in segment_words(transcript):
+        for w in words:
             idx += 1
             item_id = f"{stem}_w{idx:04d}"
-            surface = normalize_text(w.get("surface_form", ""))
+            surface = w["surface_form"]
             if not surface:
                 discards.append(_discard("word", item_id, "", "empty_label"))
+                continue
+            if surface[:1] in APOSTROPHES:
+                discards.append(_discard("word", item_id, surface, "suffix_fragment"))
+                continue
+            if not _latin_label(surface):
+                discards.append(_discard("word", item_id, surface, "non_latin_label"))
+                continue
+            if w["end_sec"] - w["start_sec"] > WORD_MAX_SEC:
+                discards.append(_discard("word", item_id, surface, "word_too_long",
+                                         f"{w['end_sec'] - w['start_sec']:.2f}s"))
                 continue
             span = span_frames(track, w["start_sec"], w["end_sec"])
             if span is None:
@@ -170,10 +221,17 @@ def sentence_items(stem: str, transcript: dict, track: Track, th: Thresholds, sy
     """-> (kept sentence dicts, discard dicts). `sync_ok` comes from word_items."""
     kept, discards = [], []
     widx = 0
-    for s_idx, seg in enumerate(transcript.get("segments", [])):
-        words = [dict(w, _idx=widx + i) for i, w in enumerate(seg.get("words", []))]
+    for s_idx, (seg, seg_words) in enumerate(segment_words(transcript)):
+        words = [dict(w, _idx=widx + i) for i, w in enumerate(seg_words)]
         widx += len(words)
-        pieces = _split(words, seg["start_sec"], seg["end_sec"])
+        # Whisper's segment start is often later than its first word's start (and the
+        # end earlier than the last word's end): the window must hold every word, or
+        # the clip opens mid-word -- 9.2% of sentences did, by up to 0.68 s.
+        start, end = seg["start_sec"], seg["end_sec"]
+        if words:
+            start = min(start, words[0]["start_sec"])
+            end = max(end, words[-1]["end_sec"])
+        pieces = _split(words, start, end)
         for p_idx, (start, end, pw) in enumerate(pieces):
             split = p_idx if len(pieces) > 1 else ""
             item_id = f"{stem}_s{s_idx:03d}" + (f"_{p_idx}" if len(pieces) > 1 else "")
