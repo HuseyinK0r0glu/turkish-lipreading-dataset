@@ -148,7 +148,7 @@ Transcript JSON schema (read-only contract for Phase 2):
 | Phase | Status |
 |-------|--------|
 | 1 — Download + Whisper ASR | Paused at the 180 h mark. 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
-| 2 — Lip extraction + SyncNet | Code in `scripts/phase2/`, piloted on 111 clips / 10 reporters and calibrated (`WORD_SYNC_MIN` 2.5). Full run over all 67,563 clips started 2026-10-09 (~23 h, log `data/phase2_run.log`). QC review + hand-labelled off-screen check pending. |
+| 2 — Lip extraction + SyncNet | Done 2026-10-10. All 67,563 clips processed (resumed once after a power cut, 0 failed): 61,825 ok / 5,505 low_sync / 233 no_words; 1,100,215 word clips (89.1% of ASR words) and 163,399 sentence clips; 61,697 crop `.npz` in `data/lip_crops/`. Progress: `scripts/phase2/phase2_status.py`. QC review + hand-labelled off-screen check pending. |
 | 3 — Dataset splits + benchmark | Not started |
 | 4–5 — Models + release | Not started |
 
