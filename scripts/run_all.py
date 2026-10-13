@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -219,6 +220,22 @@ def run_pipeline2(selected, all_rows, links_csv, model_name, clips_csv, download
     if max_hours is not None:
         print(f"[pipeline2] {have_h:.2f} h of clips already in the manifest for "
               f"{', '.join(sorted(reporters))}; stopping at {max_hours:g} h")
+    # The next row's broadcast downloads while this one is analysed. A 1h50 newscast
+    # takes ~2.5 h to download here (YouTube serves ~250 KB/s) and as long again to
+    # analyse, and the two do not compete (network vs CPU/GPU). One download at a
+    # time; a prefetch left unused at the end stays in downloads_dir, where the next
+    # run's yt-dlp --continue picks it up.
+    prefetch = ThreadPoolExecutor(max_workers=1)
+    downloads = {}  # url -> Future[Path]
+
+    def prefetch_after(i):
+        for nxt in pipe2[i:]:
+            u, rep_ = col(nxt, "url"), col(nxt, "reporter")
+            if u and rep_ and pipeline2.reporter_image(rep_).exists():
+                if u not in downloads:
+                    downloads[u] = prefetch.submit(pipeline2.download_video, u, downloads_dir)
+                return
+
     for i, r in enumerate(pipe2, start=1):
         if max_hours is not None and have_h >= max_hours:
             print(f"[pipeline2] reached {have_h:.2f} h >= --max-hours {max_hours:g}; "
@@ -236,9 +253,22 @@ def run_pipeline2(selected, all_rows, links_csv, model_name, clips_csv, download
             if reporter not in enc_cache:
                 enc_cache[reporter] = load_reference_encoding(img)
             clips_dir = clips_root / f"{reporter}_solo_clips"
+            video_path = None
+            fut = downloads.pop(url, None)
+            if fut is not None:
+                try:
+                    video_path = fut.result()
+                except Exception as exc:
+                    # e.g. it ran into an outage: retry here, behind wait_for_network
+                    print(f"[pipeline2] prefetch of {url} failed ({type(exc).__name__}); "
+                          "downloading again")
+            if video_path is None:
+                video_path = pipeline2.download_video(url, downloads_dir)
+            prefetch_after(i)
             clip_rows = pipeline2.select_clips(url, reporter, enc_cache[reporter],
                                                downloads_dir, clips_dir,
-                                               delete_source=delete_source)
+                                               delete_source=delete_source,
+                                               video_path=video_path)
             transcribe_clips_into(clip_rows, transcripts_dir, model_name)
             append_clip_rows(clips_csv, clip_rows)
             have_h += sum(c["duration_sec"] for c in clip_rows) / 3600
@@ -261,6 +291,7 @@ def run_pipeline2(selected, all_rows, links_csv, model_name, clips_csv, download
             failed += 1
             print(f"[pipeline2] [{i}/{total}] FAILED {reporter} {url}: "
                   f"{type(exc).__name__}: {exc}")
+    prefetch.shutdown(wait=False, cancel_futures=True)
     print(f"[pipeline2] finished: {done} completed, {failed} failed (left pending)")
 
 

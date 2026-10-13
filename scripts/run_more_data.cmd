@@ -9,7 +9,10 @@ set PYTHONIOENCODING=utf-8
 rem selcuk_tepeli (NOW) is left out: NOW keeps a sign-language interpreter box in every
 rem frame, so no sample is ever solo (11 episodes gave 1 clip).
 echo [%date% %time%] step 1/2: pipeline 2 for the five new presenters
-uv run python -u scripts\run_all.py --pipeline 2 --reporters ekrem_acikel sinem_fistikoglu seda_selek irfan_degirmenci sule_aydin >> data\run_all.log 2>> data\run_all.err
+uv run python -u scripts\run_all.py --pipeline 2 --reporters ekrem_acikel sinem_fistikoglu irfan_degirmenci sule_aydin >> data\run_all.log 2>> data\run_all.err
+rem seda_selek: only her first 10 of 27 newscasts (1h50 each, ~6 h a row); --limit
+rem counts completed rows too, so a re-run still stops at the same 10.
+uv run python -u scripts\run_all.py --pipeline 2 --reporters seda_selek --limit 10 >> data\run_all.log 2>> data\run_all.err
 
 echo [%date% %time%] step 2/2: Phase 2 over all clips (v1 output kept in data\phase2_v1)
 if exist data\phase2 if not exist data\phase2_v1 move data\phase2 data\phase2_v1

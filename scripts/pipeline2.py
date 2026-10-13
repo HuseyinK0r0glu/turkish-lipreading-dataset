@@ -74,14 +74,17 @@ def remove_source_video(video_path: Path) -> None:
 
 def select_clips(url, reporter, ref_encoding, downloads_dir: Path, clips_dir: Path,
                  scene_threshold=30.0, tolerance=IDENTITY_TOLERANCE, min_duration=MIN_CLIP_DURATION,
-                 delete_source=True):
+                 delete_source=True, video_path=None):
     """Download the video and export clips where only the reporter appears.
 
     With delete_source=True (the default) the downloaded source video is removed as
     soon as its clips are exported, so a full-CSV run never accumulates raw videos.
     Mirrors KEEP_P2_SOURCE_VIDEO=False in colab_run_all.ipynb.
+    video_path: the already-downloaded source (run_all prefetches the next row's
+    video while this one is analysed); None downloads it here.
     """
-    video_path = download_video(url, downloads_dir)
+    if video_path is None:
+        video_path = download_video(url, downloads_dir)
     scenes = detect_scenes(video_path, threshold=scene_threshold)
     # One sequential pass over the whole video; every scene reads its own samples.
     records = analyze_video(video_path, ref_encoding)

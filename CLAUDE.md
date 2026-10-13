@@ -151,7 +151,7 @@ transcripts 2026-10-11). `manual_review = 1` when `confidence < 0.7`.
 
 | Phase | Status |
 |-------|--------|
-| 1 — Download + Whisper ASR | Resumed 2026-10-11 (`scripts/run_more_data.cmd`): 247 rows of five NEW presenters for speaker/channel diversity — ekrem_acikel (Sözcü TV), sinem_fistikoglu (Halk TV), seda_selek (KOZA TV), irfan_degirmenci, sule_aydin (own channels); then Phase 2 again over everything into `data/phase2/`, v1 output in `data/phase2_v1/`. selcuk_tepeli (NOW, 50 rows in the CSV) was dropped after 11 episodes gave 1 clip: NOW keeps a sign-language interpreter box in every frame (~5% of frame height, above MIN_FACE_FRACTION), so invariant #3 never sees one person; exclude him from runs. Their reference photos were picked automatically (dominant face across episodes) and still need a human check. 971 older pending rows remain for later. Was paused at the 180 h mark: 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
+| 1 — Download + Whisper ASR | Resumed 2026-10-11 (`scripts/run_more_data.cmd`): 247 rows of five NEW presenters for speaker/channel diversity — ekrem_acikel (Sözcü TV), sinem_fistikoglu (Halk TV), seda_selek (KOZA TV, first 10 of her 27 rows only), irfan_degirmenci, sule_aydin (own channels); then Phase 2 again over everything into `data/phase2/`, v1 output in `data/phase2_v1/`. selcuk_tepeli (NOW, 50 rows in the CSV) was dropped after 11 episodes gave 1 clip: NOW keeps a sign-language interpreter box in every frame (~5% of frame height, above MIN_FACE_FRACTION), so invariant #3 never sees one person; exclude him from runs. Their reference photos were picked automatically (dominant face across episodes) and still need a human check. 971 older pending rows remain for later. Was paused at the 180 h mark: 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
 | 2 — Lip extraction + SyncNet | Done 2026-10-10. All 67,563 clips processed (resumed once after a power cut, 0 failed): 61,825 ok / 5,505 low_sync / 233 no_words; 1,100,215 word clips (89.1% of ASR words) and 163,399 sentence clips; 61,697 crop `.npz` in `data/lip_crops/`. Progress: `scripts/phase2/phase2_status.py`. QC review + hand-labelled off-screen check pending. |
 | 3 — Dataset splits + benchmark | Not started |
 | 4–5 — Models + release | Not started |
@@ -292,3 +292,8 @@ uv run python scripts/run_all.py --pipeline 2 --reporters cuneyt_ozdemir --max-h
 Filters apply before `--limit`, matching `colab_run_all.ipynb`'s MAX_ROWS semantics.
 `--max-hours` stops pipeline 2 once the selected reporters' clips in
 `reporter_clips.csv` reach that many hours; clips already there count.
+
+Newscasts are much slower than that average (2026-10-13): a 1h50 Halk TV / KOZA episode is
+1080p60, ~2.2 GB, ~2.5 h to download at the ~250 KB/s YouTube serves here, ~1.2 h of
+scene detection (every frame) and ~2-3 h of face analysis -- ~6 h a row. `run_pipeline2`
+therefore downloads the next row while the current one is analysed (one download ahead).
