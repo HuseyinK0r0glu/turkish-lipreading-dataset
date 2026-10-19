@@ -151,14 +151,14 @@ transcripts 2026-10-11). `manual_review = 1` when `confidence < 0.7`.
 
 | Phase | Status |
 |-------|--------|
-| 1 — Download + Whisper ASR | Resumed 2026-10-11 (`scripts/run_more_data.cmd`): 247 rows of five NEW presenters for speaker/channel diversity — ekrem_acikel (Sözcü TV), sinem_fistikoglu (Halk TV), seda_selek (KOZA TV, first 10 of her 27 rows only), irfan_degirmenci, sule_aydin (own channels); then Phase 2 again over everything into `data/phase2/`, v1 output in `data/phase2_v1/`. selcuk_tepeli (NOW, 50 rows in the CSV) was dropped after 11 episodes gave 1 clip: NOW keeps a sign-language interpreter box in every frame (~5% of frame height, above MIN_FACE_FRACTION), so invariant #3 never sees one person; exclude him from runs. Their reference photos were picked automatically (dominant face across episodes) and still need a human check. 971 older pending rows remain for later. Was paused at the 180 h mark: 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
-| 2 — Lip extraction + SyncNet | Done 2026-10-10. All 67,563 clips processed (resumed once after a power cut, 0 failed): 61,825 ok / 5,505 low_sync / 233 no_words; 1,100,215 word clips (89.1% of ASR words) and 163,399 sentence clips; 61,697 crop `.npz` in `data/lip_crops/`. Progress: `scripts/phase2/phase2_status.py`. QC review + hand-labelled off-screen check pending. |
+| 1 — Download + Whisper ASR | Resumed 2026-10-11 (`scripts/run_more_data.cmd`): five NEW presenters for speaker/channel diversity, capped 2026-10-17 to shorten the run — ekrem_acikel (Sözcü TV, 11 rows), sinem_fistikoglu (Halk TV, 19), seda_selek (KOZA TV, first 5 of 27), irfan_degirmenci and sule_aydin (own channels, first 20 each); all done 2026-10-18 (+5,302 clips, 72,865 total), then Phase 2 again over everything into `data/phase2/`. irfan_degirmenci yields little (258 clips / 0.4 h from 20 rows, 76% sync). selcuk_tepeli (NOW, 50 rows in the CSV) was dropped after 11 episodes gave 1 clip: NOW keeps a sign-language interpreter box in every frame (~5% of frame height, above MIN_FACE_FRACTION), so invariant #3 never sees one person; exclude him from runs. Their reference photos were picked automatically (dominant face across episodes) and still need a human check. 971 older pending rows remain for later. Was paused at the 180 h mark: 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
+| 2 — Lip extraction + SyncNet | Run 3 done 2026-10-19 over all 72,865 clips with the fixed segments.py (0 failed): 66,912 ok / 5,720 low_sync / 233 no_words; 1,142,706 word clips and 174,653 sentence clips; crops in `data/lip_crops/` rewritten. The v1 manifests (2026-10-10) were superseded and deleted. Progress: `scripts/phase2/phase2_status.py`. QC review + hand-labelled off-screen check pending. |
 | 3 — Dataset splits + benchmark | Not started |
 | 4–5 — Models + release | Not started |
 
-Vocabulary (2026-10-11, `vocab_report.py`, val levent_gultekin, test yilmaz_ozdil + ozlem_gurses):
-only 342 surface / 482 lemma classes reach 300 train examples, below the 500 target —
-hence the extra data. Audit of 50 random v1 items: `data/audit50/README.md`.
+Vocabulary (`vocab_report.py`, val levent_gultekin, test yilmaz_ozdil + ozlem_gurses): classes with
+>= 300 train examples went from 342 surface / 482 lemma (v1, 2026-10-11) to 367 surface / 507 lemma
+(run 3, 2026-10-19) — lemma labeling meets the 500 target, surface does not. Audit of 50 random v1 items: `data/audit50/README.md`.
 
 Known gaps: `channel` is not propagated into
 `reporter_clips.csv` (see PHASE2_PLAN §1.2); 4622 of 7109 pipeline-2 rows are a single
