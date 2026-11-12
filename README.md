@@ -52,6 +52,17 @@ turkish-lipreading-dataset/
         ├── manifests.py               ← input snapshot + channel join, output CSVs, resume
         ├── phase2_status.py           ← read-only progress/ETA snapshot of a live run
         └── qc_report.py               ← contact sheets + distribution summary
+    └── phase3/                        ← Phase 3: splits, vocabulary, spotting set (see "Phase 3" below)
+        ├── common.py                  ← paths, tolerant manifest loaders, label classes
+        ├── audit_manifests.py         ← checks on the Phase 2 manifests
+        ├── build_splits.py            ← filter, speaker split, vocabulary → word_*.csv
+        ├── build_spotting_set.py      ← sentence pools + spotting queries / negatives
+        ├── make_verification_set.py   ← 5% sample, previews, Label Studio tasks
+        ├── score_kappa.py             ← agreement, verified labels, corrected spotting GT
+        ├── dataset_stats.py           ← distribution tables
+        ├── make_release.py            ← the public metadata package
+        ├── stoplist.txt               ← classes kept out of the vocabulary
+        └── vocab_report.py            ← quick class count under a speaker split
 ```
 
 ---
@@ -409,3 +420,34 @@ running.
 
 `channel` comes from joining `reporter_clips.csv` to `video_links.csv` on the YouTube
 video id, and is written into every Phase 2 manifest.
+
+---
+
+## Phase 3 — splits, vocabulary, spotting set
+
+Manifest work only (`plans/PHASE3_PLAN.md`): reads `data/phase2/*.csv`, writes
+`data/phase3/`, never opens a video and never writes into `data/phase2/`. Run in order;
+every script is deterministic (seed in `splits.json`) and replaces its own outputs.
+
+```powershell
+uv run python scripts/phase3/audit_manifests.py         # checks → stats/audit.txt
+uv run python scripts/phase3/build_splits.py            # word_*.csv, vocab_*.csv, splits.json
+uv run python scripts/phase3/build_spotting_set.py      # sentence_*.csv, spotting_gt/
+uv run python scripts/phase3/dataset_stats.py           # stats/*.csv
+uv run python scripts/phase3/make_verification_set.py   # 5% sample + previews (long; resumable)
+uv run python scripts/phase3/score_kappa.py             # after annotation
+uv run python scripts/phase3/make_release.py            # release/ (metadata only)
+```
+
+`build_splits.py` splits **by speaker**; the default is val `levent_gultekin`, test
+`yilmaz_ozdil` + `ozlem_gurses` (`--val` / `--test` change it, `stats/split_search.csv`
+ranks the alternatives). Train rows on a test channel are dropped, so test is
+channel-independent. A class needs 300 train examples from 5 train speakers; tokens with
+digits and `stoplist.txt` entries are not classes. Each word row keeps every Phase 2
+column and gains `label_surface`, `label_lemma`, `split`, `in_vocab_surface`,
+`in_vocab_lemma`; pixels are `np.load(npz_path)["frames"][frame_start:frame_end]`.
+
+`make_verification_set.py` renders previews (crop + source audio) into
+`data/phase3/verification/media/` and writes Label Studio task files; the steps are in
+`data/phase3/verification/README.md`. The previews are internal: `make_release.py`
+copies metadata only and asserts that no media file is in `release/`.

@@ -26,6 +26,7 @@ dependencies = [
     "mediapipe",
     "python-speech-features",
     "scipy",
+    "scikit-learn>=1.9.1",
 ]
 
 [tool.uv]

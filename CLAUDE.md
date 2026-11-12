@@ -16,7 +16,7 @@ turkish-lipreading-dataset/
 ├── uv.lock                      ← committed lockfile
 ├── pipeline2_reporter_pictures/ ← reference face photo per reporter (<slug>.jpeg)
 ├── models/                     ← YuNet (committed); MediaPipe + SyncNet weights auto-download, gitignored
-├── plans/PHASE2_PLAN.md
+├── plans/PHASE2_PLAN.md, PHASE3_PLAN.md
 ├── colab_run_all.ipynb          ← Colab GPU runner (self-contained reimplementation)
 ├── scripts/
 │   ├── run_all.py               ← MAIN ENTRY POINT (dispatches rows to pipeline 1 / 2)
@@ -43,7 +43,15 @@ turkish-lipreading-dataset/
 │       ├── phase2_status.py     ← read-only progress/ETA snapshot of a live run (`--follow`)
 │       ├── qc_report.py         ← contact sheets + distribution summary
 │       └── calibrate_offscreen.py ← spliced-audio evidence for WORD_SYNC_MIN
-│   └── phase3/vocab_report.py   ← classes with >= 300 TRAIN examples under a speaker split
+│   └── phase3/                  ← Phase 3 (manifest work only; never writes data/phase2/)
+│       ├── common.py            ← paths, tolerant manifest loaders, label classes
+│       ├── audit_manifests.py   ← step 1: checks on the Phase 2 manifests
+│       ├── build_splits.py      ← steps 2-4: filter, speaker split, cap, vocabulary
+│       ├── build_spotting_set.py ← step 5: sentence pools + spotting queries/negatives
+│       ├── make_verification_set.py / score_kappa.py ← step 6: Label Studio sample, kappa
+│       ├── dataset_stats.py / make_release.py ← step 7: stats tables, public metadata
+│       ├── stoplist.txt         ← classes kept out of the vocabulary
+│       └── vocab_report.py      ← classes with >= 300 TRAIN examples under a speaker split
 └── data/                        ← ALL generated; gitignored. Nothing is placed here by hand.
 ```
 
@@ -124,6 +132,7 @@ Everything here is generated. Inputs live at the repo root.
 | `reporter_clips.csv` | `run_all.append_clip_rows` | Master manifest, one row per kept clip. **The Phase 1 → Phase 2 hand-off.** |
 | `_pipeline1_links.csv` | `run_all` | Temp CSV of pending pipeline-1 rows handed to the downloader. |
 | `test_run/` | `test_data_pipe.py` | Isolated copy of all of the above; the real CSV is never touched. |
+| `phase3/` | `scripts/phase3/*` | `word_{train,val,test}.csv` (Phase 2 word rows + `label_surface`, `label_lemma`, `split`, `in_vocab_*`), `sentence_{val,test}.csv`, `vocab_{surface,lemma}.csv`, `surface_to_lemma.csv`, `speaker_table.csv`, `dropped.csv`, `splits.json` (speakers, parameters, input hash), `spotting_gt/`, `verification/` (previews WITH audio: internal), `stats/`, `release/` (metadata only: the public part). |
 
 `reporter_clips.csv` columns: `reporter, source_url, source_video, clip_file, start_sec,
 end_sec, duration_sec, face_height_px, transcript_text, transcript_json`. Paths are stored
@@ -152,13 +161,15 @@ transcripts 2026-10-11). `manual_review = 1` when `confidence < 0.7`.
 | Phase | Status |
 |-------|--------|
 | 1 — Download + Whisper ASR | Resumed 2026-10-11 (`scripts/run_more_data.cmd`): five NEW presenters for speaker/channel diversity, capped 2026-10-17 to shorten the run — ekrem_acikel (Sözcü TV, 11 rows), sinem_fistikoglu (Halk TV, 19), seda_selek (KOZA TV, first 5 of 27), irfan_degirmenci and sule_aydin (own channels, first 20 each); all done 2026-10-18 (+5,302 clips, 72,865 total), then Phase 2 again over everything into `data/phase2/`. irfan_degirmenci yields little (258 clips / 0.4 h from 20 rows, 76% sync). selcuk_tepeli (NOW, 50 rows in the CSV) was dropped after 11 episodes gave 1 clip: NOW keeps a sign-language interpreter box in every frame (~5% of frame height, above MIN_FACE_FRACTION), so invariant #3 never sees one person; exclude him from runs. Their reference photos were picked automatically (dominant face across episodes) and still need a human check. 971 older pending rows remain for later. Was paused at the 180 h mark: 1511 of 7117 rows completed (all 8 pipeline-1, 1503 of 7109 pipeline-2); `reporter_clips.csv` holds 67,563 clips / 180.0 h from 24 reporters (2026-10-09). |
-| 2 — Lip extraction + SyncNet | Run 3 done 2026-10-19 over all 72,865 clips with the fixed segments.py (0 failed): 66,912 ok / 5,720 low_sync / 233 no_words; 1,142,706 word clips and 174,653 sentence clips; crops in `data/lip_crops/` rewritten. The v1 manifests (2026-10-10) were superseded and deleted. 2026-10-19 cleanup: channel names unified (Halktv → Halk TV, SÖZCÜ Televizyonu → Sözcü TV, CNN_TURK_5N1K → CNN Türk) in `video_links.csv` and the Phase 2 manifests, and irfan_degirmenci's split-screen video with test speaker ozlem_gurses (Lp9NGIgjUFE, 20 clips) removed everywhere, its row dropped from the CSV so `reset_empty_rows.py` cannot bring it back: 72,845 clips. Progress: `scripts/phase2/phase2_status.py`. Off-screen hand check (2026-11): 100 boundary words (`word_sync_conf` just over 2.5) labelled, 97 on-screen; a second 200-word set (boundary / far below / far above, `data/phase2/qc/offscreen_check_2.csv`) awaits labelling and decides whether `WORD_SYNC_MIN` stays 2.5. QC montages reviewed by hand 2026-11-12. Still open before Phase 2 is "done": a repeat of the alignment audit on run 3 (`data/audit50/` is v1 only); see PHASE2_PLAN §10. |
-| 3 — Dataset splits + benchmark | Not started |
+| 2 — Lip extraction + SyncNet | Run 3 done 2026-10-19 over all 72,865 clips with the fixed segments.py (0 failed): 66,912 ok / 5,720 low_sync / 233 no_words; 1,142,706 word clips and 174,653 sentence clips; crops in `data/lip_crops/` rewritten. The v1 manifests (2026-10-10) were superseded and deleted. 2026-10-19 cleanup: channel names unified (Halktv → Halk TV, SÖZCÜ Televizyonu → Sözcü TV, CNN_TURK_5N1K → CNN Türk) in `video_links.csv` and the Phase 2 manifests, and irfan_degirmenci's split-screen video with test speaker ozlem_gurses (Lp9NGIgjUFE, 20 clips) removed everywhere, its row dropped from the CSV so `reset_empty_rows.py` cannot bring it back: 72,845 clips. Progress: `scripts/phase2/phase2_status.py`. Off-screen hand check (2026-11): 100 boundary words (`word_sync_conf` just over 2.5) labelled, 97 on-screen; a second 200-word set (boundary / far below / far above, `data/phase2/qc/offscreen_check_2.csv`) awaits labelling and decides whether `WORD_SYNC_MIN` stays 2.5. QC montages reviewed by hand 2026-11-12. Alignment audit repeated on run 3 (`data/audit50_run3/README.md`, 50 words, automatic rules all pass). Only the labelling of the 200-word off-screen set is still open before Phase 2 is "done"; see PHASE2_PLAN §10. |
+| 3 — Dataset splits + benchmark | Code done and run 2026-11-12 on the run 3 manifests (`scripts/phase3/`, plan `plans/PHASE3_PLAN.md`); manual verification NOT done. Split by speaker: val levent_gultekin, test yilmaz_ozdil + ozlem_gurses, train 26 speakers; 1,118,242 word clips kept of 1,142,556 = 82.1 / 8.4 / 9.5 % (dropped: 8,217 track gaps, 6,617 word spans < 0.04 s, 61 without label, 9,419 `manual_review` rows in val/test; train keeps `manual_review`). The 15% per-speaker train cap removes nothing (largest: cuneyt_ozdemir 12.3%). Vocabulary (>= 300 train examples, >= 5 train speakers, no digit tokens, `stoplist.txt`): **354 surface / 496 lemma classes** — lemma is 4 short of 500 because the seven digit classes (1-6, 10) and "eee" are excluded (`--keep-digits` gives 503); 466,503 / 757,173 in-vocab word clips. Spotting pool: 14,164 val / 19,367 test sentence clips, 352 surface / 494 lemma classes with >= 5 positive test sentences; `spotting_gt/queries.csv` is the Whisper auto seed. Open: the Label Studio pass (`make_verification_set.py` → annotate → `score_kappa.py`: 5% sample, kappa, hand-corrected `spotting_gt/test_gt_verified.csv`; only a 12-item trial was rendered), then `make_release.py` again; owner decision on releasing speaker slugs as-is. Val is one speaker and test two, all personal channels with large faces (no TV studio in eval); `stats/split_search.csv` ranks alternatives. |
 | 4–5 — Models + release | Not started |
 
 Vocabulary (`vocab_report.py`, val levent_gultekin, test yilmaz_ozdil + ozlem_gurses): classes with
 >= 300 train examples went from 342 surface / 482 lemma (v1, 2026-10-11) to 367 surface / 507 lemma
-(run 3, 2026-10-19) — lemma labeling meets the 500 target, surface does not. Audit of 50 random v1 items: `data/audit50/README.md`.
+(run 3, 2026-10-19) — lemma labeling meets the 500 target, surface does not. Those are raw counts;
+the Phase 3 vocabulary (`build_splits.py`, after the quality filter, digit rule and stoplist) is
+354 / 496. Audit of 50 random v1 items: `data/audit50/README.md`.
 
 Known gaps: `channel` is not propagated into
 `reporter_clips.csv` (see PHASE2_PLAN §1.2); 4622 of 7109 pipeline-2 rows are a single

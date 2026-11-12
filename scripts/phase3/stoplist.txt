@@ -1,0 +1,12 @@
+# Classes never admitted to the vocabulary, one per line (compared Turkish-lower-cased,
+# against both the surface class and the lemma class). '#' starts a comment.
+# Tokens containing a digit ("3", "10", "2023'te") are excluded by build_splits.py itself
+# (--keep-digits turns that off): Whisper writes a number as digits or as a word at whim,
+# so "3" and "üç" would be two classes for one spoken word.
+
+# hesitation fillers
+eee
+ee
+ııı
+hı
+hmm
