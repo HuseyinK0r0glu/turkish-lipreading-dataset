@@ -28,7 +28,12 @@ Phase 1 run continues to append to it.
   `calibrate_offscreen.py`, which splices another reporter's audio into the second half
   of a clip. At 2.5, 98.8% of real words are kept and 97.6% of foreign-audio words are
   dropped. 21 of 38 half-foreign clips still passed the clip-level SyncNet ≥ 3.
-  `LIP_MOTION_MIN` stays unset. The hand-labelled check on real broadcasts is still to do.
+  `LIP_MOTION_MIN` stays unset. Hand-labelled check on real broadcasts (2026-11): 100 kept
+  words with `word_sync_conf` just above 2.5 (`qc/offscreen_check_labeled_erkan.csv`) -- 97
+  were the on-screen speaker, 3 were not. A second 200-word set (100 boundary, 50 far below,
+  50 far above 2.5; `qc/offscreen_check_2.csv`, blind order, key in `..._groups.csv`) is
+  still to be labelled; it tests whether the 31,927 words dropped below 2.5 are mostly
+  genuine (threshold too strict) or truly off-screen.
 - **Layout (§5):** a `scripts/phase2/` package of single-purpose modules instead of four
   `phase2_*.py` scripts. Phase 1 code is imported, not edited.
 
@@ -173,8 +178,8 @@ data/
 ├── reporter_transcripts/        (existing, stream B per-clip JSON)
 ├── reporter_clips.csv           (existing, stream B master manifest = Phase 2 input)
 ├── lip_crops/                   ← NEW Phase 2 root
-│   ├── word_clips/<clip_id>.npz
-│   └── sentence_clips/<clip_id>.npz
+│   └── <reporter>/<source clip stem>.npz   (one per SOURCE clip, every frame once;
+│                                            word/sentence rows index it by frame range)
 ├── phase2/                      ← NEW manifests & QC
 │   ├── word_clips.csv           (per-word-clip metadata manifest)
 │   ├── sentence_clips.csv       (per-sentence-clip metadata manifest)
@@ -220,7 +225,7 @@ only needed transiently for SyncNet (which wants A/V together) — see §4.5.
 | `clip_id` | generated | source clip stem + `_w<idx>` (§2.1) |
 | `npz_path` | generated | relative posix path |
 | `surface_form` | transcript | NFC-normalized, stripped |
-| `lemma` | transcript | currently == surface_form (zeyrek TODO from Phase 1) |
+| `lemma` | transcript | zeyrek lemma (`lemmatize.lemmatize_word`), backfilled into all transcripts 2026-10-11 |
 | `speaker_id` | `reporter_clips.csv:reporter` | the reporter slug |
 | `channel` | `video_links.csv` join on video id | §1.2 |
 | `source_clip` | `reporter_clips.csv:clip_file` | parent solo clip (provenance) |
@@ -468,16 +473,24 @@ weights.
 
 ## 10. Definition of done (Phase 2)
 
-- `data/lip_crops/word_clips/` and `.../sentence_clips/` populated with 88×88 grayscale
-  `.npz` clips for all qualifying, sync-passing, identity-tagged source clips.
-- `data/phase2/word_clips.csv` + `sentence_clips.csv` manifests complete, carrying
+Status 2026-11-12: `[x]` done, `[ ]` open.
+
+- [x] `data/lip_crops/<reporter>/<stem>.npz` (88×88 grayscale, one file per source clip, see
+  §2.1 note) populated for all qualifying, sync-passing, identity-tagged source clips
+  (run 3: 72,865 clips, 0 failed).
+- [x] `data/phase2/word_clips.csv` + `sentence_clips.csv` manifests complete, carrying
   `speaker_id`, `channel`, labels, timing, confidence, SyncNet score, pose stats, size
   stats and (for sentences) `word_spans`.
-- `syncnet_scores.csv`, `discarded.csv`, `face_track_report.csv` written.
-- QC montage + distribution report reviewed.
-- README updated with Phase 2 run instructions + SyncNet setup; `mediapipe` in
+- [x] `syncnet_scores.csv`, `discarded.csv`, `face_track_report.csv` written.
+- [x] QC montage + distribution report reviewed (`qc/montage_*.png`, `qc/summary.txt`;
+  montages reviewed by hand 2026-11-12).
+- [ ] Off-screen audit closed: second 200-word set labelled, `WORD_SYNC_MIN` confirmed or
+  changed (changing it means re-running `run_phase2.py` segmentation).
+- [ ] Alignment audit repeated on run 3 (`data/audit50/` covers only the v1 manifests; its
+  fixes were applied in run 3 but not re-checked).
+- [x] README updated with Phase 2 run instructions + SyncNet setup; `mediapipe` in
   `pyproject.toml` / `uv.lock`.
-- `CLAUDE.md` Status table: Phase 2 marked done.
+- [ ] `CLAUDE.md` Status table: Phase 2 marked done (when the open items above close).
 
 > Net result: Phase 3 can start immediately — it only needs the two manifests + the `.npz`
 > pools to do frequency analysis, vocabulary selection, speaker/channel-independent splits,
