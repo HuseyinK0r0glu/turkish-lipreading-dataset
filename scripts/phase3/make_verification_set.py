@@ -343,7 +343,7 @@ def main():
         for e in errors[:10]:
             rep(f"    {e}")
     rep.save(out / "sample_report.txt")
-    print(f"\nnext: {(out / 'README.md').relative_to(C.ROOT).as_posix()}")
+    print(f"\nnext: {C.show(out / 'README.md')}")
 
 
 if __name__ == "__main__":

@@ -374,7 +374,7 @@ def main():
 
     info = {
         "created": date.today().isoformat(),
-        "input": {"path": args.words.resolve().relative_to(C.ROOT).as_posix(),
+        "input": {"path": C.show(args.words),
                   "rows": n_input, "sha256": C.sha256(args.words)},
         "speakers": {name: sorted(s for s, v in split_of.items() if v == name)
                      for name in C.SPLITS},
@@ -395,7 +395,7 @@ def main():
     }
     C.write_text(args.out / "splits.json", json.dumps(info, ensure_ascii=False, indent=2) + "\n")
     rep.save(args.out / "stats" / "build_report.txt")
-    print(f"\nwrote {args.out.relative_to(C.ROOT).as_posix()}/")
+    print(f"\nwrote {C.show(args.out)}/")
 
 
 if __name__ == "__main__":

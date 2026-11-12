@@ -166,7 +166,7 @@ def main():
     rep("\nGround truth here is the Whisper + SyncNet auto seed, not human-verified.")
 
     info["spotting"] = {
-        "input": {"path": args.sentences.resolve().relative_to(C.ROOT).as_posix(),
+        "input": {"path": C.show(args.sentences),
                   "rows": n_input, "sha256": C.sha256(args.sentences)},
         "min_positives": args.min_positives, "neg_per_class": args.neg_per_class,
         "sentences": {name: int(len(pool[name])) for name in pool},
