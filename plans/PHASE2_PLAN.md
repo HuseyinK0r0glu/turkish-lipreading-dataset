@@ -31,9 +31,18 @@ Phase 1 run continues to append to it.
   `LIP_MOTION_MIN` stays unset. Hand-labelled check on real broadcasts (2026-11): 100 kept
   words with `word_sync_conf` just above 2.5 (`qc/offscreen_check_labeled_erkan.csv`) -- 97
   were the on-screen speaker, 3 were not. A second 200-word set (100 boundary, 50 far below,
-  50 far above 2.5; `qc/offscreen_check_2.csv`, blind order, key in `..._groups.csv`) is
-  still to be labelled; it tests whether the 31,927 words dropped below 2.5 are mostly
-  genuine (threshold too strict) or truly off-screen.
+  50 far above 2.5; `qc/offscreen_check_2.csv`, blind order, key in `..._groups.csv`) was
+  labelled 2026-11-25 (0 = the visible mouth does not produce the word): far below
+  (−5.8 … −0.03, dropped) 8 on-screen / 42 off-screen; boundary (2.50–2.51) 93 / 7; far
+  above (8.0–10.7) 50 / 0. The far-below off-screen words are mostly an interviewer or
+  guest talking while the presenter listens; 3 are frozen video-call pictures (`rusen_cakir`),
+  1 a Whisper hallucination, and 3 of the 8 on-screen ones have a hand over the mouth. So
+  drops below 0 are mostly correct. But only 23.5% of the 31,922 dropped words score below 0;
+  76.5% lie in 0–2.5, which neither set sampled, and the on-screen share rises toward the
+  threshold (0% below −3, 13% in −3…−1, 33% in −1…0, 93% just above 2.5), so that band is
+  likely mixed. Rows 27, 68, 80, 94, 110, 114, 130, 165, 181 were judged from video only
+  and still need a listen. Side finding: row 107 (an `ece_uner` clip) shows another person
+  (Phase 1 identity miss; no item reached the manifests).
 - **Layout (§5):** a `scripts/phase2/` package of single-purpose modules instead of four
   `phase2_*.py` scripts. Phase 1 code is imported, not edited.
 
@@ -473,7 +482,7 @@ weights.
 
 ## 10. Definition of done (Phase 2)
 
-Status 2026-11-12: `[x]` done, `[ ]` open.
+Status 2026-11-25: all items done -- Phase 2 is complete.
 
 - [x] `data/lip_crops/<reporter>/<stem>.npz` (88×88 grayscale, one file per source clip, see
   §2.1 note) populated for all qualifying, sync-passing, identity-tagged source clips
@@ -484,13 +493,15 @@ Status 2026-11-12: `[x]` done, `[ ]` open.
 - [x] `syncnet_scores.csv`, `discarded.csv`, `face_track_report.csv` written.
 - [x] QC montage + distribution report reviewed (`qc/montage_*.png`, `qc/summary.txt`;
   montages reviewed by hand 2026-11-12).
-- [ ] Off-screen audit closed: second 200-word set labelled, `WORD_SYNC_MIN` confirmed or
-  changed (changing it means re-running `run_phase2.py` segmentation).
-- [ ] Alignment audit repeated on run 3 (`data/audit50/` covers only the v1 manifests; its
-  fixes were applied in run 3 but not re-checked).
+- [x] Off-screen audit closed: second 200-word set labelled 2026-11-25 (see top),
+  `WORD_SYNC_MIN = 2.5` confirmed. Not measured: the 0–2.5 band (24,425 dropped words,
+  ~2% of all word clips); ~50 words from 1–2.5 would show what 2.5 costs.
+- [x] Alignment audit repeated on run 3 (`data/audit50_run3/README.md`, 2026-11-12): 50 words,
+  all automatic rules pass; visual crop/label check not repeated. Known: word spans overshoot
+  the sentence window by > 0.05 s in 2% of sentences (max 0.16 s).
 - [x] README updated with Phase 2 run instructions + SyncNet setup; `mediapipe` in
   `pyproject.toml` / `uv.lock`.
-- [ ] `CLAUDE.md` Status table: Phase 2 marked done (when the open items above close).
+- [x] `CLAUDE.md` Status table: Phase 2 marked done (2026-11-25).
 
 > Net result: Phase 3 can start immediately — it only needs the two manifests + the `.npz`
 > pools to do frequency analysis, vocabulary selection, speaker/channel-independent splits,
